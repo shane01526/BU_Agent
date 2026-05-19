@@ -43,3 +43,11 @@ pgdata/
 
 # Docker
 docker-compose.override.yml
+
+# Stray screenshots / images at repo root
+/*.png
+/*.jpg
+/*.jpeg
+/*.gif
+螢幕擷取畫面*
+Screenshot*
