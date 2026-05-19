@@ -1,0 +1,68 @@
+# 產險 × 分類任務的 BRD 模板（例：理賠文件型別自動分類）
+template_id: property_insurance_classification_v1
+bu: 產險
+project_type: 分類
+
+sections:
+  - id: sec_bg
+    title: 需求背景
+    owner: bu
+    default_status: auto_filled  # Explore 通常已挖到「目前流程 + 痛點」
+    extract_from_explore: [pain_signals, process_target]
+    questions:
+      - 目前歸檔 / 標註是哪個團隊在做?月均量多少?
+
+  - id: sec_req_analysis
+    title: 需求分析
+    owner: bu
+    default_status: needs_round2
+    extract_from_explore: [direction]
+    questions:
+      - 分類類別清單是固定的還是會調?上次調整是什麼時候?
+      - 哪些類別之間最容易混淆?
+
+  - id: sec_exec
+    title: 執行方式（不含 API 格式）
+    owner: bu
+    default_status: needs_round2
+    extract_from_explore: [process_target]
+    questions:
+      - 文件來源是 PDF / 影像 / Email?有掃描品質差的比例嗎?
+      - AI 輸出後,人工複核比例期望是多少?
+      - 多分類信心度的閾值要怎麼設?
+
+  - id: sec_user_cases
+    title: User Cases
+    owner: bu
+    default_status: needs_round2
+    questions:
+      - 一份典型理賠文件會經歷哪幾個分類關卡?
+      - 什麼樣的文件 AI 不該處理(例:多語、手寫)?
+
+  - id: sec_exception
+    title: 例外處理
+    owner: bu
+    default_status: needs_round2
+    questions:
+      - AI 信心度低時,該轉哪個團隊接手?
+      - 誤分類發現後,有沒有 audit trail 回追?
+
+  - id: sec_ai_approach
+    title: AI 方法建議
+    owner: ai_team
+    default_status: placeholder
+
+  - id: sec_data_spec
+    title: 資料規格
+    owner: ai_team
+    default_status: placeholder
+
+  - id: sec_io_format
+    title: API / IO 格式
+    owner: cd_team
+    default_status: placeholder
+
+  - id: sec_deploy_ops
+    title: 部署與維運
+    owner: cd_team
+    default_status: placeholder

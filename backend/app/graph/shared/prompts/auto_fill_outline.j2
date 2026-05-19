@@ -1,0 +1,40 @@
+{# v1.0 2026-05-13 — Consult Step 1 用 explore 雙輸出填章節 #}
+{% if kc %}
+{% include '_knowledge_card.j2' %}
+
+**寫初稿時請套用上述業務術語與流程脈絡**;有 cathay_ai_inventory 項目可引用時,
+在「需求分析」或「執行方式」章節提一句「可優先評估與既有 [name] 的整合 / 重用」。
+{% endif %}
+
+## 任務
+依下列輸入,給每個章節一份**初稿文字**(不是大綱、不是 bullet,是可直接讀的段落)。
+
+## 輸入
+- 候選方向:{{ direction }}({{ process_target }} / {{ project_type }})
+- one_line_goal:{{ one_line_goal }}
+- pain signals:{% for p in pain_signals %}{{ p }}{% if not loop.last %}、{% endif %}{% endfor %}
+- Explore 段落描述(BU 已確認):
+  {{ paragraph }}
+{% if ai_necessity_triage %}
+- AI 必要性 triage 結果:
+  - 推薦最小可行解:{{ ai_necessity_triage.selected_solution_class }}({{ ai_necessity_triage.selected_ai_necessity }})
+  - 判斷理由:{{ ai_necessity_triage.selected_rationale }}
+  {% if ai_necessity_triage.bu_overrode %}
+  - **BU 已 override**:看過警示但堅持以 AI 方向推進。這在「需求分析」章節要明確記下:
+    "曾考慮以 [{{ ai_necessity_triage.selected_solution_class }}] 處理,理由是 [{{ ai_necessity_triage.selected_rationale }}],但 BU 評估後認為仍需以 AI 方案進行。"
+  {% endif %}
+{% endif %}
+
+## 章節清單
+{% for s in sections %}
+### {{ s.id }}:{{ s.title }} (default_status={{ s.default_status }})
+{% if s.extract_from_explore %}
+這節可從 explore 推得的 hint:{{ s.extract_from_explore | join(", ") }}
+{% endif %}
+{% endfor %}
+
+## 規則
+- `auto_filled` 章節:寫具體的初稿(150-300 字),引用 pain signals 與 process_target 名詞
+- `needs_round2` 章節:寫一段 *提示性* 的 placeholder(50-100 字),指出之後第 2 輪訪談要釐清什麼
+- `placeholder` 章節:固定回「(由 AI 科 / CD 科後續補充)」,不要展開
+- 不要在初稿裡用 markdown heading;BRD 結構由外層處理

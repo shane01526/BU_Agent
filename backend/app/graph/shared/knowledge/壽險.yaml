@@ -1,0 +1,22 @@
+# 壽險知識卡 — 占位版本,等壽險窗口填
+version: v0.0-stub
+last_updated: ""
+contact: "[TODO 找壽險 IT 窗口]"
+
+glossary: []
+
+process_overview: |
+  [TODO] 壽險主要流程:核保 → 出單 → 收費 → 給付 / 續期
+
+typical_pain_patterns: []
+volume_hints: []
+cathay_ai_inventory: []
+
+taboos:
+  - 不可在 BRD 寫入完整保單號 / 身分證
+  - 不可記錄具體保戶姓名
+  - 涉及醫療核保資訊需符合內部隱私規範
+
+preferred_solution_classes: []
+avoided_solution_classes: []
+past_brd_lessons: []

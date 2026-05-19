@@ -1,0 +1,18 @@
+{# v1.0 2026-05-13 — 跨章節一致性檢查 #}
+## 任務
+檢查下列 BRD 章節之間有沒有**明顯互相矛盾**(不是缺漏)。
+
+## 章節
+{% for s in sections %}
+### {{ s.title }} ({{ s.section_id }})
+{{ s.content_md }}
+
+{% endfor %}
+
+## 規則
+- 只回報「明確矛盾」,例:章節 A 說「全自動」、章節 B 說「需 100% 人工複核」→ 矛盾
+- 缺漏 / 不夠細不算矛盾;flag_for_ba_review 章節跳過
+- 如果沒矛盾,回 `{"conflicts": []}`
+- 每條 conflict 描述:
+  - section_ids:涉及的 1-N 個 section_id
+  - description:< 60 字、白話講清楚衝突點

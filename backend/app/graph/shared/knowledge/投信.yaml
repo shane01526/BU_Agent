@@ -1,0 +1,22 @@
+# 投信知識卡 — 占位版本
+version: v0.0-stub
+last_updated: ""
+contact: "[TODO 找投信 IT 窗口]"
+
+glossary: []
+
+process_overview: |
+  [TODO] 投信主要業務:基金募集 / 操作 / 行銷 / 投資人服務
+
+typical_pain_patterns: []
+volume_hints: []
+cathay_ai_inventory: []
+
+taboos:
+  - 不可在 BRD 寫入完整帳號 / 身分證
+  - 基金績效預測類內容禁止用 LLM 直接生成
+  - 涉及投資建議需符合 RR1-5 適配性規範
+
+preferred_solution_classes: []
+avoided_solution_classes: []
+past_brd_lessons: []

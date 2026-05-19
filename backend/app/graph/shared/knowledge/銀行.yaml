@@ -1,0 +1,22 @@
+# 銀行知識卡 — 占位版本
+version: v0.0-stub
+last_updated: ""
+contact: "[TODO 找銀行 IT 窗口]"
+
+glossary: []
+
+process_overview: |
+  [TODO] 銀行主要業務:存放款 / 信用卡 / 財富管理 / 法金 / 數位通路
+
+typical_pain_patterns: []
+volume_hints: []
+cathay_ai_inventory: []
+
+taboos:
+  - 不可在 BRD 寫入完整帳號 / 信用卡號 / 身分證
+  - KYC / AML 相關需 flag for compliance review
+  - 涉跨境匯兌資訊需符合外匯管理規定
+
+preferred_solution_classes: []
+avoided_solution_classes: []
+past_brd_lessons: []

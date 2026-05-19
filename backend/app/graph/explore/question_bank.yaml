@@ -1,0 +1,45 @@
+# BU_Agent_v2 題庫（5 階段）；對齊 overview §4.1.3 / Plan_bu_agent 題庫
+# 每題為 prompt template，實際提問由 LLM 依 state context 生成，題目只作為 seed
+# M2 階段：以 mock backend 跑時直接使用這裡的文字
+
+stages:
+  - id: 1
+    name: 發散 (divergence)
+    intent: 從 BU 工作日常中 surface context
+    seeds:
+      - 聊聊你日常工作的樣子——每天 / 每週你花最多時間在哪些事情上？
+      - 哪些事情是你做得很熟、但同事或新人常做錯的？
+    max_rounds: 2
+
+  - id: 2
+    name: 脈絡建立 (context)
+    intent: 抓出 pain signals + 量能 + 資料可得性
+    seeds:
+      - 剛剛提到的流程裡，最耗時或最容易出錯的環節是哪裡？一個月發生幾次？
+      - 這件事如果做錯，下游要花多少成本去救？可不可以回頭修正？
+      - 目前處理這件事會看哪些資料 / 系統？是文字、表格還是圖像？
+    max_rounds: 3
+
+  - id: 3
+    name: 收斂 (convergence)
+    intent: 把候選方向收斂到 ≤ 3
+    seeds:
+      - 聽下來有幾件事都在重複出現；如果只能先處理一件，你會選哪一件？為什麼？
+      - 這幾個候選方向中，你覺得哪個最有感 / 最痛？
+    max_rounds: 2
+
+  - id: 4
+    name: Challenge
+    intent: stress-test 最上位候選（reversibility / ROI / gap）
+    seeds:
+      - 如果這個 AI 給錯答案會怎樣？最糟的情況是什麼？
+      - 目前這個問題你們是怎麼做的？如果沒有 AI 會多花多少力氣？
+    max_rounds: 2
+
+  - id: 5
+    name: 交接準備 (handoff prep)
+    intent: 引導 BU 明確選定一個候選方向
+    seeds:
+      - 聽起來方向差不多了；你想先從哪一個開始？
+      - 我把我聽到的整理成一段，你看看跟你想的一樣嗎？
+    max_rounds: 2

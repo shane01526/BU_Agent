@@ -1,0 +1,19 @@
+{# v1.0 2026-05-13 — Consult Step 2 章節提問 #}
+## 任務
+針對章節「{{ section_title }}」對 BU 提出**一道**訪談問題。
+
+## 上下文
+- 已選定方向:{{ direction }}({{ process_target }} / {{ project_type }})
+- 章節既有草稿(可能是空、可能是 placeholder):
+  {{ section_draft }}
+- 模板提供的提問種子(可改寫,擇 1):
+{% for q in seed_questions %}
+  - {{ q }}
+{% endfor %}
+- 本章 BU 已回過幾次:{{ rounds_so_far }} 次
+
+## 規則
+- 一句話、≤ 60 字
+- 開頭不要加「請問」「想了解」之類客套,直接切入
+- 問完之後,在心裡標註 BU 答不出來時可建議 flag_for_ba_review(這部分不寫在輸出)
+- 如果 rounds_so_far ≥ 2 且 BU 上輪明顯答不出來,改成「這部分要不要先 flag 給 BA?」

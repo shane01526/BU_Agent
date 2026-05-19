@@ -1,0 +1,21 @@
+{# v1.0 2026-05-13 — 把 BU 回答整合進章節 draft #}
+## 任務
+你要把 BU 剛剛在對話區的回答,整合進 BRD 章節「{{ section_title }}」的 draft。
+
+## 章節既有 draft(可能是 placeholder 或前幾輪累積)
+{{ current_draft }}
+
+## BU 最新回答
+{{ bu_answer }}
+
+## 上下文
+- 候選方向:{{ direction }}({{ process_target }} / {{ project_type }})
+- 章節定位:{{ section_title }}
+
+## 規則
+1. **保留章節主結構**(段落、清單格式),BU 答的內容融入合適位置
+2. **保留 BU 講過的具體名詞、量化資訊**(數字、流程名、規則名);不要泛化
+3. **不要在輸出加導語、結論、追問、Markdown heading**
+4. 長度控制在 200-450 字
+5. 用書面語(BRD 風格),不要保留口語助詞
+6. 直接輸出整合後的章節文字,僅此而已

@@ -1,0 +1,66 @@
+services:
+  postgres:
+    image: postgres:15-alpine
+    container_name: bu_agent_postgres
+    environment:
+      POSTGRES_USER: bu_agent
+      POSTGRES_PASSWORD: bu_agent
+      POSTGRES_DB: bu_agent
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U bu_agent -d bu_agent"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: bu_agent_backend
+    environment:
+      DATABASE_URL: postgresql+psycopg://bu_agent:bu_agent@postgres:5432/bu_agent
+      LANGGRAPH_CHECKPOINT_URL: postgresql://bu_agent:bu_agent@postgres:5432/bu_agent
+      LLM_MODE: ${LLM_MODE:-mock}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      GEMINI_MODEL: ${GEMINI_MODEL:-gemini-2.5-pro}
+      AUTH_MODE: ${AUTH_MODE:-mock}
+      APP_ENV: local
+      CORS_ORIGINS: http://localhost:3000
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ./backend:/app
+    command: ["bash", "/app/scripts/entrypoint.sh"]
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: bu_agent_frontend
+    environment:
+      # 瀏覽器走同源 /api 經 Next.js rewrites 代理，不直接打後端
+      NEXT_PUBLIC_API_BASE: ""
+      # SSE 例外：瀏覽器直連 backend (host:8000)，避開 Next dev proxy 的 event-stream buffer
+      NEXT_PUBLIC_API_BASE_BROWSER: http://localhost:8000
+      # Next.js server-side proxy 在 container 內連 backend service name
+      BACKEND_INTERNAL_URL: http://backend:8000
+      NEXT_PUBLIC_AUTH_MODE: mock
+    ports:
+      - "3000:3000"
+    depends_on:
+      - backend
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+      - /app/.next
+    command: ["pnpm", "dev"]
+
+volumes:
+  pgdata:

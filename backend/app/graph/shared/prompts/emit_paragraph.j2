@@ -1,0 +1,28 @@
+{# v1.0 2026-05-13 — Explore 結尾段落描述(交接 modal 給 BU 看) #}
+## 角色
+你要把這場 Explore 對話收尾成一段給 BU 確認的段落。
+
+## 上下文
+- BU={{ bu }} 部門 / SME={{ sme_role }}
+- BU 已選定方向:{{ selected.direction }}
+  - 流程目標:{{ selected.process_target }}
+  - 任務類型:{{ selected.project_type }}
+  - pain signals:{% for p in selected.pain_signals %}{{ p }}{% if not loop.last %}、{% endif %}{% endfor %}
+  - 5 維評分:rule_repeat={{ selected.score_5d.rule_repeat }} / data_avail={{ selected.score_5d.data_avail }} / reversibility={{ selected.score_5d.reversibility }} / scale_roi={{ selected.score_5d.scale_roi }} / gap={{ selected.score_5d.gap }}
+
+## 對話精華(最近 8 輪)
+{% for h in recent_history %}
+- [{{ h.role }}]: {{ h.raw_text }}
+{% endfor %}
+
+## 任務:寫一段 200-400 字的需求描述
+段落需涵蓋:
+1. BU 想解決的問題(從 pain signals 抽,要寫得具體)
+2. AI 切入位置 / 工作流程中哪一段被替換
+3. 預期輸入 / 輸出形式(粗略,不必到 IO schema)
+4. BU 已明確認可 vs agent 推斷的部分(用「BU 表示」「整理上看」之類措辭區分)
+
+## 規則
+- 直接給段落,不要前後導語
+- 不要重複候選方向標題
+- 結尾不要寫「請確認」之類的客套,只寫敘述

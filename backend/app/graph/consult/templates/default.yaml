@@ -1,0 +1,69 @@
+# Fallback BRD 模板：找不到 BU/project_type 對應檔時用這份
+# 對齊 overview §4.2.1 BU 五章節 + AI 科 / CD 科 placeholder
+template_id: default_v1
+bu: "*"
+project_type: "*"
+
+sections:
+  - id: sec_bg
+    title: 需求背景
+    owner: bu
+    default_status: needs_round2
+    extract_from_explore: [pain_signals, process_target]
+    questions:
+      - 這件事目前是怎麼做的?誰做?多常做?
+      - 目前痛點主要出現在哪個環節?
+
+  - id: sec_req_analysis
+    title: 需求分析
+    owner: bu
+    default_status: needs_round2
+    extract_from_explore: [direction, pain_signals]
+    questions:
+      - 哪些業務規則必須遵守?哪些彈性可以調?
+      - 預期 AI 介入後,哪一段流程會改變?
+
+  - id: sec_exec
+    title: 執行方式（不含 API 格式）
+    owner: bu
+    default_status: needs_round2
+    extract_from_explore: [process_target, project_type]
+    questions:
+      - 你期待 AI 把輸入變成什麼形式的輸出?
+      - 哪些情況要走人工複核?哪些可以全自動?
+
+  - id: sec_user_cases
+    title: User Cases
+    owner: bu
+    default_status: needs_round2
+    questions:
+      - 一個典型成功案例會長什麼樣?能舉一個近期實例嗎?
+      - 哪些邊界案例你覺得 AI 處理會吃力?
+
+  - id: sec_exception
+    title: 例外處理
+    owner: bu
+    default_status: needs_round2
+    questions:
+      - AI 答錯時,下游要怎麼接?
+      - 多久內必須人工介入才不會影響 SLA?
+
+  - id: sec_ai_approach
+    title: AI 方法建議
+    owner: ai_team
+    default_status: placeholder
+
+  - id: sec_data_spec
+    title: 資料規格
+    owner: ai_team
+    default_status: placeholder
+
+  - id: sec_io_format
+    title: API / IO 格式
+    owner: cd_team
+    default_status: placeholder
+
+  - id: sec_deploy_ops
+    title: 部署與維運
+    owner: cd_team
+    default_status: placeholder

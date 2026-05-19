@@ -1,0 +1,19 @@
+# Default BU 知識卡 — 找不到精準匹配的 <bu>.yaml 時用
+# 內容刻意保留通用、不寫死任何產業細節,讓 agent 維持 baseline 表現
+version: v0.1
+last_updated: "2026-05-14"
+contact: "(default fallback,請為該 BU 建立 <bu>.yaml)"
+
+process_overview: |
+  本 BU 的具體業務流程資料尚未建立。Agent 在發問時應主動詢問該 BU 的工作流節點、
+  使用的系統、量能等資訊,以便建立脈絡。
+
+typical_pain_patterns:
+  - 人工歸檔 / 標註耗時
+  - 規則散落各處,新人不易上手
+  - 報表 / 統計需手動彙整
+
+taboos:
+  - 不可在 BRD 寫入完整身分證、信用卡號、保單號等具識別性 PII
+  - 不可記錄具體保戶 / 客戶姓名
+  - 涉及法遵紅線(KYC / AML 等)需明確標註並 flag for BA review

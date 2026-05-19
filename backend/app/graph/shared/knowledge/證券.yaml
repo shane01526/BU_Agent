@@ -1,0 +1,22 @@
+# 證券知識卡 — 占位版本
+version: v0.0-stub
+last_updated: ""
+contact: "[TODO 找證券 IT 窗口]"
+
+glossary: []
+
+process_overview: |
+  [TODO] 證券主要業務:經紀 / 自營 / 承銷 / 投顧 / 數位下單
+
+typical_pain_patterns: []
+volume_hints: []
+cathay_ai_inventory: []
+
+taboos:
+  - 不可在 BRD 寫入完整帳號 / 身分證
+  - 涉及未公開重大資訊(MNPI)的內容必須先 flag for legal review
+  - 客戶交易紀錄不得用於 LLM 訓練未經明確授權
+
+preferred_solution_classes: []
+avoided_solution_classes: []
+past_brd_lessons: []

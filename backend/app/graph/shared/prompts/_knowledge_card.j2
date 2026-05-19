@@ -1,0 +1,59 @@
+{# v1.0 2026-05-14 — 共用 knowledge card 注入區塊
+   各 prompt 用 {% include '_knowledge_card.j2' with context %} 引入,
+   要求外層提供 `kc`(KnowledgeCard 物件,非 None)。
+   對 v0.0-stub 的 BU 卡片自動 degrade gracefully(空欄位不 render)。
+#}
+## {{ kc.bu }} 部門 — 業務脈絡(請在提問 / 寫作時引用)
+
+{% if kc.glossary %}
+**業務術語對照(出現時請使用全名或縮寫,不要自創)**
+{% for g in kc.glossary %}
+- {{ g.term }} = {{ g.full_name }}{% if g.note %} — {{ g.note }}{% endif %}
+{% endfor %}
+{% endif %}
+
+{% if kc.process_overview and kc.process_overview.strip() %}
+**流程概觀**
+{{ kc.process_overview.strip() }}
+{% endif %}
+
+{% if kc.typical_pain_patterns %}
+**已知常見痛點 pattern(BU 提到時可自然 reference,不要假裝沒聽過)**
+{% for p in kc.typical_pain_patterns %}
+- {{ p }}
+{% endfor %}
+{% endif %}
+
+{% if kc.volume_hints %}
+**規模 / 量能參考**
+{% for v in kc.volume_hints %}
+- {{ v }}
+{% endfor %}
+{% endif %}
+
+{% if kc.cathay_ai_inventory %}
+**Cathay 內部已建 AI / RPA / 工具(評估 ROI / gap 時優先考慮重用,不要重做)**
+{% for i in kc.cathay_ai_inventory %}
+- {{ i.name }}({{ i.status }}{% if i.owner %} / {{ i.owner }}{% endif %}{% if i.scope %} / scope: {{ i.scope }}{% endif %}){% if i.note %} — {{ i.note }}{% endif %}
+{% endfor %}
+{% endif %}
+
+{% if kc.taboos %}
+**法遵 / 合規地雷(BU 若提到相關內容,主動提醒並建議 flag for BA review)**
+{% for t in kc.taboos %}
+- {{ t }}
+{% endfor %}
+{% endif %}
+
+{% if kc.preferred_solution_classes or kc.avoided_solution_classes %}
+**該 BU 解決方案偏好(影響 ai_necessity 判斷)**
+{% if kc.preferred_solution_classes %}- 偏好:{{ kc.preferred_solution_classes | join(", ") }}{% endif %}
+{% if kc.avoided_solution_classes %}- 避免:{{ kc.avoided_solution_classes | join(", ") }}{% endif %}
+{% endif %}
+
+{% if kc.past_brd_lessons %}
+**過去 BRD 教訓(避免重蹈)**
+{% for l in kc.past_brd_lessons %}
+- {{ l }}
+{% endfor %}
+{% endif %}

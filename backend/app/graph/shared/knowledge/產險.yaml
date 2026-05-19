@@ -1,0 +1,104 @@
+# 產險知識卡(Knowledge Card) — 範例版本
+# 給內部 BU 窗口 review 時:標 [TODO:核實] 的欄位都需要實際確認
+# 標 [PII] 的部分必須去敏化,不留具體保戶 / 客戶資訊
+#
+# 改完後重啟 backend container(或呼叫 knowledge_loader.clear_cache())以清 LRU cache
+
+version: v0.1
+last_updated: "2026-05-14"
+contact: "[TODO:核實] 產險 IT 對口 / 數位轉型辦公室"
+
+# ───── L1 業務術語對照 ─────
+glossary:
+  - term: PIS
+    full_name: "[TODO:核實] 核保系統 (Policy Issuing System)"
+    note: "商業保險 / 個人保險共用主系統"
+  - term: NB
+    full_name: "新契約 (New Business)"
+    note: "區別於續保(RN)"
+  - term: RN
+    full_name: "續保 (Renewal)"
+    note: ""
+  - term: 商火
+    full_name: "商業火險"
+    note: "高保額 / 標的物多 / 個案核保"
+  - term: 個火
+    full_name: "個人火險"
+    note: "標準化、自動核保比例高"
+  - term: 車險
+    full_name: "汽車保險(任意險 + 強制險)"
+    note: ""
+  - term: 理賠案件
+    full_name: "Claim case"
+    note: "從報案 → 勘查 → 理算 → 給付的完整 case"
+  - term: 標的物
+    full_name: "保險標的(Subject of Insurance)"
+    note: "商火常涉及多個建物 / 設備項目"
+
+# ───── L2 BU 流程概觀 ─────
+process_overview: |
+  [TODO:核實] 產險主要業務流程:
+  1. 核保線:報價 → 核保 → 出單 → 續保
+     - 個火 / 個人車險:標準規則,系統自動核保比例高
+     - 商火 / 高保額:個案核保,需人工判斷標的物風險
+  2. 理賠線:報案受理 → 勘查 → 文件審核 → 理算 → 給付
+     - 文件型別多(警政紀錄、醫療單據、車禍照片、修理估價單 ...)
+     - 部分文件由保戶上傳、部分由 client 端業務員協助
+  3. 續保 / 加退保:續保提醒、保單變更、退費計算
+
+typical_pain_patterns:
+  - "[TODO:核實] 商火個案核保需 SME 逐筆判讀標的物風險,新人訓練成本高"
+  - "[TODO:核實] 理賠文件型別歸檔耗時,常有混淆類別"
+  - "[TODO:核實] 核保 FAQ 重複回答,內部知識散落各 SOP 文件"
+  - "車險案件量大,人力處理瓶頸明顯"
+
+# ───── L2.5 規模與量能 ─────
+volume_hints:
+  - "[TODO:核實] 個人車險新契約月均 X 件"
+  - "[TODO:核實] 商火新契約月均 Y 件"
+  - "[TODO:核實] 理賠案件月均 Z 件"
+
+# ───── L3 Cathay 已建 AI / 工具清單 ─────
+cathay_ai_inventory:
+  - name: "[TODO:核實] 文件 OCR 模型"
+    status: "已上線"
+    owner: "AI 科"
+    scope: "理賠 / 核保文件辨識"
+    note: "PDF / 影像皆可,中文 + 英文"
+  - name: "[TODO:核實] 理賠 RPA Bot 群"
+    status: "已上線"
+    owner: "RPA team"
+    scope: "理賠 → 給付系統的資料搬運"
+    note: "請先確認新需求是否能用既有 bot 擴充"
+  - name: "[TODO:核實] FAQ 知識庫(內部 wiki)"
+    status: "已上線"
+    owner: "客服 / 教育訓練"
+    scope: "核保 SOP 查詢"
+    note: "目前無 LLM 介面"
+  - name: "[TODO:核實] 客戶分群 ML 模型"
+    status: "PoC"
+    owner: "AI 科"
+    scope: "行銷 / 續保提醒"
+    note: ""
+
+# ───── 法遵 / 合規地雷 ─────
+taboos:
+  - "不可在 BRD 寫入完整保單號 / 身分證 / 車牌"
+  - "不可記錄具體保戶姓名(可用「保戶 A」「商家 B」匿名)"
+  - "[TODO:核實] 商火標的物座標屬高度敏感,涉及核保資訊不對稱"
+  - "理賠涉醫療資訊需符合 HIPAA-like 內規,需 flag for legal review"
+  - "車禍照片不得用於模型訓練未經保戶同意"
+
+# ───── 該 BU 偏好 / 避免的解決方案類型 ─────
+# (影響 score_candidates 階段 ai_necessity 評估)
+preferred_solution_classes:
+  - llm_extract  # 文件抽取場景多
+  - rpa  # 已有 RPA team 配套,推案容易
+avoided_solution_classes:
+  - agent  # [TODO:核實] 商業保險領域對 multi-turn agent 接受度低,客戶體驗風險高
+
+# ───── 過去 BRD 經驗教訓 ─────
+past_brd_lessons:
+  - "[TODO:核實] 文件型別分類案曾因類別表 6 個月調整一次,模型 retrain 成本被低估"
+  - "[TODO:核實] 客服 FAQ 案曾因規則型 chatbot 回不出邊界問題,後改 LLM RAG"
+  - "[TODO:核實] 商火個案核保 PoC 因標的物資料不齊未上線,需先有資料治理"

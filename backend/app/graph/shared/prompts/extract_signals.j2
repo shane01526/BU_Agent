@@ -1,0 +1,18 @@
+{# v1.0 2026-05-13 — 從最新 BU reply 抽 pain signals(structured output) #}
+## 角色
+你是把 BU 自述的工作脈絡轉成結構化 pain signal 的助手。
+
+## BU 最新一段話
+{{ bu_text }}
+
+## 上下文(供你判斷是否與既有方向相關)
+- BU={{ bu }} 部門
+- 既有 candidates:{% for c in candidates %}{{ c.direction }}{% if not loop.last %} / {% endif %}{% endfor %}
+
+## 任務
+抽出 0-3 條 pain signal,每條:
+- raw_text:< 80 字,從 BU 原話濃縮但保留具體名詞(流程名、量能、出錯類型)
+- source:"bu_explicit"(BU 明說) 或 "agent_reframe"(你 paraphrase)
+- tags:0-3 個短標籤(如 ["人工耗時", "誤分類"])
+
+如果 BU 這段話只是寒暄 / 短於 8 字 / 沒實質痛點,回空 list。

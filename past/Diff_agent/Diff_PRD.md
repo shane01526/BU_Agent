@@ -1,0 +1,506 @@
+# PRD
+
+Owner: 雨諠 吳
+Status: Planning
+Parent-Task: BRD Agent (https://www.notion.so/BRD-Agent-33dee105f483802abfd1cde4c0049eca?pvs=21)
+Completion: 0
+
+# BRD Agent — 產品需求文件 
+
+> 版本：v0.1 (Draft)
+撰寫日期：2026-04-28
+作者：shane@cathayholdings.com.tw
+狀態：待審閱
+> 
+
+---
+
+## 1. 背景與動機 (Background)
+
+需求討論會議常以口頭方式進行（電話、視訊、面對面），會後須由 BA / PM 將結論手動回寫到 BRD (Business Requirements Document)。此流程存在三個痛點：
+
+1. **回寫成本高**：一場 60 分鐘的會議，整理筆記與更新 BRD 約需 30–60 分鐘。
+2. **遺漏與失真**：人工聽打容易遺漏細節，或將討論結論誤植到錯誤章節。
+3. **變更追蹤困難**：BRD 多次迭代後，難以快速回答「這條需求是哪一場會議決定的」。
+
+本專案目標是建立一個 Slack-觸發 Agent，**將會議錄音轉為 BRD 的具體修改提案**，並以 Google Docs Suggesting mode 寫入；BA 在 Docs 端逐項 Accept / Reject，半自動地維護 BRD。
+
+---
+
+## 2. 目標 (Goals & Non-Goals)
+
+### 2.1 Goals
+
+- **G1**：上傳一段會議錄音（≤ 60 分鐘），Agent 在 5 分鐘內提出可審核的 BRD 修改建議。
+- **G2**：所有修改皆以 **section-level Suggestion** 呈現（不重寫整份文件），BA 在 Google Docs UI 逐項 Accept / Reject。
+- **G3**：**觸發**動作完全在 Slack（上傳音檔、收到通知、查狀態）；**review** 動作切換到 Google Docs Suggesting mode。Slack ↔︎ Docs 之間透過 deep-link 一鍵跳轉。
+- **G4**：每筆變更可追溯到原始錄音的時間戳 (timestamp citation)。
+- **G5**：BRD 儲存於 **Google Docs**；audit trail 由 Docs 內建的 Revision History 提供，Agent 端不需自行維護版本紀錄。
+
+### 2.2 Non-Goals (目前沒有做的功能)
+
+- ❌ 即時轉錄（live captioning）(目前僅處理錄音檔上傳)。
+- ❌ 取代 BA 的判斷 (Agent 永遠是「提議者」，不會自動寫入 BRD)。
+- ❌ 多語系混合超過兩種以上（目前只有做 中文 + 英文)。
+- ❌ 處理白板手寫、簡報截圖等視覺資訊。(目前僅處理文字)。
+- ❌ **修改 BRD 內的表格內容（修訂記錄、IO 欄位表、判斷規則表）與流程圖**：本期 Agent 僅處理段落（paragraph body）級別的 edits；若會議決議與表格 / 流程圖內容相關，Agent 會在最近的段落（或表格上方）留下 anchored comment 說明，**不嘗試** insert/update 表格 cell、append 表格 row、或替換圖片。後續會以 `target_kind: paragraph | table_row_append | table_cell` 欄位擴充支援（見 §12.1 R-5）。
+
+---
+
+## 3. 使用者與情境 (Users & Use Cases)
+
+### 3.1 主要使用者
+
+| Persona | 角色 | 主要訴求 |
+| --- | --- | --- |
+| **BA (Business Analyst)** | BRD 的 owner | 想快速把會議結論轉成 BRD edits，但不想失去最終決定權 |
+| **PM** | 推動會議的人 | 想確保「會議講過的事」確實落到文件 |
+| **RD / Tech Lead** | BRD 的讀者 | 想知道「這條 spec 來自哪場會議」以利澄清 |
+
+### 3.2 核心情境 (User Stories)
+
+**US-1**：BA 開完「產品責任險合理性檢核」需求討論會議後，把錄音檔拖到 Slack channel，@BRD-Agent，附上《合理性檢核 BRD》的 Google Docs 連結。Agent 回 Slack「N 條建議已寫入 Doc，點此 review」，BA 開啟 Doc 在 Suggesting mode 下逐項 Accept / Reject。
+
+**US-2**：BA 在 Docs 端 Reject 一條建議並留 comment「這段是討論另一張 BRD（外部風險照片辨識），不要動本份」。下次跑同一 Doc 時，Agent 透過 comments API 讀到 reject 理由作為 negative feedback。
+
+**US-3**：RD 看到 BRD 「業務邏輯」章節某一條規則不清楚，點開 Agent 在該章節留下的 anchored comment（內含錄音時間戳 + 轉錄片段），直接跳到原始決議來源。
+
+### 3.3 BRD 文件規範
+
+以 Cathay 內部 **Data AI BA 團隊 BRD 標準模板** 為對齊依據。
+
+- **Title**：`產險 ACT - <主題> AI 工具 BRD`，**Subtitle**：`金控 Data AI BA 團隊`
+- **章節結構（Heading 1）**：`修訂記錄` → `需求背景` → `需求分析` → `執行方式` → `User Cases` → `例外處理` → `初步技術評估` → `時程規劃`
+- **次層章節（Heading 2，視主題出現於「需求分析」與「執行方式」之下）**：`業務流程` / `流程圖`、`業務邏輯`、`輸入內容規則`、`<X>判斷規則`、`輸出內容說明` / `輸出結果`、`系統、欄位、資料格式`、`API格式`
+- **僅使用 H1 + H2 兩層**（不使用 H3 / Title 內巢狀）
+- **不使用 Google Docs Tabs**：原始格式為 docx，搬上 Drive 後預設為單一 Tab
+- **大量內容承載於表格**：修訂記錄、IO 欄位表、判斷規則表（5-9 欄），本期不在 Agent 修改範圍（見 §2.2）
+- **流程圖以圖片嵌入**（`<w:drawing>`），本期不在 Agent 修改範圍
+
+> 不符合此模板的 Doc（自由排版、純粗體當標題、heading 文字大量為空）目前暫不接受。
+> 
+
+---
+
+## 4. 功能需求 (Functional Requirements)
+
+### 4.1 輸入 (Input)
+
+- **F-1.1**：支援音訊格式 `.mp3 / .m4a / .wav / .ogg`，單檔 ≤ 200 MB，時長 ≤ 60 分鐘。
+- **F-1.2**：使用者需提供目標 BRD 的 **Google Docs URL 或 Doc ID**（可選 Tab ID）；可在 Slack command 或互動表單中提供。BA 必須是該 Doc 的 editor，且已透過 OAuth 授權 Agent 代表其操作。
+- **F-1.3**：可選輸入「會議主題 / 上下文 hint」，協助 Agent 理解專業術語。
+
+### 4.2 處理 Pipeline
+
+- **F-2.1 ASR (Speech-to-Text)**
+    - 中文 + 英文 code-switching
+    - 輸出含時間戳 (word-level or segment-level)
+- **F-2.2 意圖萃取**
+    - LLM 直接從轉錄產出「結構化 edit proposals」（每條 edit 即一條決議）；不另存中間的「決議清單 / 待辦 / open questions」物件
+    - 每條 edit 綁定原文 timestamp + 引用 quote
+- **F-2.3 BRD 對齊 (Alignment)**
+    - 透過 Docs API 抓整份 Doc，**全部塞進 LLM context**（不做 chunking / RAG；倚賴 Gemini 1M context window）
+    - **章節 ID = `<doc_id>:<heading_text>`**（複合 ID）
+        - 主鍵：Google Doc ID（一份 BRD = 一個 Doc）
+        - 次層：Doc 內 Heading 1 / 2 樣式段落的「標題文字」作為章節 ID（**只取 H1+H2**；空 heading 過濾掉）
+        - 範例：`1abcDEF...:業務邏輯`、`1abcDEF...:產品代號判斷準則`
+        - 若 BA 後續啟用 Google Docs Tabs（目前模板不用），section ID 自動延伸為 `<doc_id>:<tab_id>:<heading_text>`；本期假設單 Tab，`tab_id` 預設 NULL
+    - 章節範圍（content 起訖）由「下一個同層或更高層 heading」界定；在此範圍內以段落（paragraph body）為 edit 目標，**不含表格 cell 與圖片**（見 §2.2）
+    - 若無對應章節，Agent 不自行新增，而是回報「無對應章節，建議手動補入」並在 Slack 報告
+- **F-2.4 Edit 生成**
+    - 產出結構化 edit operations：`{type: insert|update|delete, target_kind, doc_id, tab_id, section_heading, anchor_text, replacement_text, source_timestamp, confidence}`
+    - **`target_kind`**：本期固定為 `paragraph`（段落 body 級別 edit）。預留 `table_row_append` / `table_cell` 作為後續擴充（PoC 通過後 P3+；見 §2.2 與 §12.1 R-5）
+    - **`tab_id`**：可空；本期固定為 NULL（單 Tab Doc）
+    - **`anchor_text`**：要在該章節 paragraph body 內定位的原文（必為 verbatim 子字串）；用於計算 Docs API 需要的 `startIndex` / `endIndex`。若該章節主要內容在表格 / 圖片，Agent 應改成在「最近的段落」或「該章節 heading 後緊鄰的空白處」留 anchored comment，而非 insert/update
+    - 每個 edit 都附信心分數，低於閾值的標記為「需人工確認」（在 Slack 報告，但仍寫入 Doc 為建議）
+
+### 4.3 提議呈現 (Suggestion Presentation)
+
+> 採 Google Docs Suggesting mode，**主要 review 介面是 Google Docs，不是 Slack**。Slack 只負責摘要 + 跳轉。
+> 
+- **F-3.1**：建議直接以 **Google Docs Suggesting mode** 寫入目標 Doc。每個 edit 對應一個 tracked-change suggestion，BA 在 Docs UI 看到的就是 native 的「同事提建議」介面（綠色插入、紅色刪除、底色標示）。
+- **F-3.2**：每個建議旁邊，Agent 自動加上一條 **anchored comment**，內容包含：
+    - 信心分數（如 `confidence: 0.92`）
+    - 來源時間戳 + 原文 quote（如 `[00:18:42] "BU 補充說保健食品這次也要納入合理性檢核範圍"`）
+    - 推論理由（大約一句話）
+    - 會議標題 + meeting_id（用於追溯）
+- **F-3.3**：Slack 端 **只回一條摘要訊息**，內含：
+    - Doc 連結（直接跳到第一條建議）
+    - 統計：「已寫入 N 條建議到《BRD 標題》」
+    - 簡短列表：每條建議的章節 + operation + confidence（**不顯示完整 diff**）
+    - 「Open in Google Docs」按鈕
+
+### 4.4 審核與寫回 (Human-in-the-loop via Google Docs)
+
+> **「寫入」與「採納」是分開的兩個動作**。Agent 永遠是寫 *建議*；採納由 BA 在 Docs 端做，Agent 不直接修改 final 內容。
+> 
+- **F-4.1**：Agent 透過 Docs API `batchUpdate` 將每條 edit 寫成 `InsertText` / `DeleteContentRange` / `ReplaceAllText` 操作，**且設定為 Suggestion**（`writeControl` 帶 `targetRevisionId` + Suggesting mode）。寫入後**永遠不直接修改 Doc 的 final 版本**。
+- **F-4.2**：BA 在 Google Docs UI 內逐項 Accept / Reject。Accept 由 Docs 自動寫入主文並記錄在 Revision History；Reject 則丟棄該建議。**Agent 不參與這一步**。
+- **F-4.3**：Reject 後續處理：
+    - 若 BA 在 Reject 時加 comment（e.g. 「這條算錯案」），Agent 下次處理同 Doc 時透過 **Drive Comments API** 讀取該 comment 作為 negative feedback。
+    - 若無 comment，僅單純丟棄（不重跑）。
+    - **沒有 in-Slack reject loop**（簡化自原 LangGraph conditional edge 設計）。
+- **F-4.4**：Audit trail：Agent 不需要自己維護 audit log；Google Docs 的 **Revision History** 已記錄誰、何時、Accept 了哪條建議，業界 BA 已熟悉。Agent 端只需在自己的 `edit_proposals` 表紀錄「這條 suggestion_id 對應 Docs 哪條建議」即可雙向追溯。檔名版本約定（如 `BRD_合理性檢核_20251226_V1.1.docx`）由 BA 自行維護，Agent **不更動 Doc 檔名**；Docs Revision History 與檔名 `_YYYYMMDD_Vx.y` 視為兩套並存的版本軌跡。
+
+### 4.5 Slack Bot 互動
+
+> Slack 是 **trigger + status** surface，不是 review surface。
+> 
+- **F-5.1 Slash Command**：`/brd-update <google-docs-url>` 開啟上傳對話框。第一次使用會跳出 OAuth 授權流程（per-user OAuth，每位 BA 自己授權）。
+- **F-5.2 Mention 觸發**：在 channel `@BRD-Agent` + 上傳音檔（沿用先前設計）。
+- **F-5.3 互動 UI**：使用 Slack Block Kit 提供：
+    - 「Open in Google Docs」按鈕（深連結到第一條建議）
+    - 「Reauthorize」按鈕（OAuth token 過期時）
+    - **不再提供** Approve / Reject 按鈕（這些動作改在 Docs 端）
+- **F-5.4 通知**：處理完成、建議寫入 Doc、OAuth token 過期等事件都在原 thread 回覆。
+
+---
+
+## 5. 系統架構 (Architecture)
+
+- 整體採 **LangGraph state-machine** 模型；HITL 透過 Google Docs Suggesting mode 達成（不在 graph 內部 `interrupt()`）。
+- 每場會議 = 一個 graph run，state 由 PostgresSaver 持久化以利 audit / resume。
+
+```
+                     ┌─────────────┐
+   Slack User ─────▶ │  Slack Bot  │
+                     │ (slack-bolt)│
+                     └──────┬──────┘
+                            │ /brd-update + audio + Doc URL
+                            ▼
+   ╔════════════════ LangGraph App ════════════════╗
+   ║                                                ║
+   ║   ┌──────────┐                                 ║
+   ║   │transcribe│   (Gemini audio)                ║
+   ║   └────┬─────┘                                 ║
+   ║        ▼                                       ║
+   ║   ┌──────────┐                                 ║
+   ║   │fetch_doc │   (Docs API, OAuth per-user)    ║
+   ║   └────┬─────┘                                 ║
+   ║        ▼                                       ║
+   ║   ┌──────────────┐                             ║
+   ║   │extract_edits │   (Gemini structured output)║
+   ║   └────┬─────────┘   讀 reject comments        ║
+   ║        ▼                                       ║
+   ║   ┌────────────────────┐                       ║
+   ║   │apply_as_suggestions│ (Docs API batchUpdate ║
+   ║   └────┬───────────────┘  in Suggesting mode)  ║
+   ║        ▼                                       ║
+   ║      END → notify Slack with Doc 連結          ║
+   ║                                                ║
+   ║   checkpointer = PostgresSaver (audit only)    ║
+   ╚════════════════════════════════════════════════╝
+                            │
+                            │
+        ┌───────────────────┼─────────────────────┐
+        ▼                   ▼                     ▼
+  ┌──────────┐      ┌──────────────┐    ┌──────────────┐
+  │Object    │      │Postgres      │    │Google        │
+  │Store     │      │(checkpoints +│    │Workspace     │
+  │(audio)   │      │ edit_proposals│    │(Docs API)    │
+  │          │      │ + oauth_tokens)   └──────────────┘
+  └──────────┘      └──────────────┘            ▲
+                                                │
+                                                │ BA 在 Docs 端
+                                                │ Accept / Reject
+                                                │ Suggestions
+                                                └─ (Agent 不參與)
+```
+
+### 5.1 Components
+
+- **Slack Bot (`slack-bolt`)**：trigger + status surface，不再做 review。
+    - `/brd-update <doc-url>` + 音檔上傳 → 呼叫 `graph.ainvoke(state, config={"thread_id": meeting_id})`
+    - 第一次使用：跳出 OAuth consent URL；BA 授權後 token 存入 `oauth_tokens` 表
+    - graph 跑完後：bot 回 thread 一條摘要訊息 + Doc 連結（**不再有 Approve / Reject 按鈕**）
+- **LangGraph App**：核心 pipeline，**4 個 node** 組成 state graph（簡化自先前 6 node 設計，因為 HITL 移到 Docs 端）：
+    1. `transcribe` —— 呼叫 Gemini Files API 拿 transcript
+    2. `fetch_doc` —— 用 BA 的 OAuth token 呼叫 Docs API：抓整份 Doc，序列化成 LLM 易讀格式（H1/H2 + paragraph body；過濾空 heading；表格與圖片以 `<table N rows × M cols>` / `<image>` placeholder 標示供 LLM 參考但不可作為 edit target），外加 Drive Comments API 抓上一輪 Reject comments
+    3. `extract_edits` —— 呼叫 Gemini structured output；input 含 transcript + 整份 Doc + 上一輪 reject reasons；output 是 edit proposals 含 `doc_id` + `section_heading` + `anchor_text`（`target_kind` 本期固定 `paragraph`）
+    4. `apply_as_suggestions` —— 對每條 edit 呼叫 Docs API `batchUpdate` 寫成 Suggestion；額外為每條建議用 `comments.create` 加上來源 timestamp + quote
+- **Checkpointer (PostgresSaver)**：保留作 audit trail（每場會議的執行軌跡可回放）；不再用於 HITL resume。
+- **Storage**：
+    - 錄音：本機磁碟 / Postgres BYTEA（PoC 階段）
+    - LangGraph state + business 表 (`meetings`, `edit_proposals`, `oauth_tokens`)：Postgres
+    - BRD 本體：**Google Workspace（Docs API）**
+
+## 6. 技術選型 (Tech Stack)
+
+| 層次 | 選項 |
+| --- | --- |
+| **Pipeline 框架** | LangGraph + `langchain-core`（state machine + PostgresSaver checkpointer；HITL 靠 Google Docs Suggesting mode，不用 `interrupt()`） |
+| **ASR** | Gemini 2.5 Pro audio（透過 Files API 上傳音檔） |
+| **LLM** | Gemini 2.5 Pro（`langchain-google-genai`） |
+| **LLM SDK 接法** | 混合：結構化文字輸出走 LangChain `with_structured_output`；audio file input 在 node 內直接呼叫 `google-genai` SDK |
+| **Checkpointer** | MemorySaver（D1–D7 本機）→ PostgresSaver（D8 起） |
+| **Diarization** | 不採用（本期延後評估） |
+| **Backend** | FastAPI + Postgres（由 LangGraph checkpointer 取代 job queue） |
+| **Slack SDK** | `slack-bolt` (Python) |
+| **Doc Ops** | `google-api-python-client`（Docs API + Drive API）；Suggesting mode 透過 `documents.batchUpdate` + `writeControl`；目前僅處理段落 edit（§2.2） |
+| **OAuth** | `google-auth` + `google-auth-oauthlib`（per-user OAuth；refresh token 加密存 Postgres） |
+| **Doc → LLM 輸入** | 整份 Doc 序列化成 plain text + H1/H2 結構標記（表格 / 圖片以 placeholder）；不做 chunking / RAG（倚賴 Gemini 1M context） |
+| **Observability** | stdout log |
+| **Deploy** | 本機 dev（uvicorn + ngrok 暴露 Slack webhook） |
+
+---
+
+## 7. 核心使用者流程 (User Flow)
+
+```
+1. BA 在 #brd-updates channel 輸入：
+   /brd-update https://docs.google.com/document/d/1abc.../edit
+
+2. (首次使用) Bot 回 OAuth consent URL；BA 點擊授權 → refresh token 存 Postgres
+   (已授權者跳過此步)
+
+3. Bot 回對話框：「請上傳會議錄音 + 簡述會議主題」
+
+4. BA 上傳 mp3 + 輸入「合理性檢核 - 食品業判斷規則討論會議」
+
+5. Bot 回：「✅ 已收到，預計 3-5 分鐘完成」
+   (graph.ainvoke 開跑)
+
+6. (背景) LangGraph 4 個 node 依序跑：
+   transcribe → fetch_doc → extract_edits → apply_as_suggestions
+   (每條 edit 寫成 Suggesting-mode 建議 + 一條 anchored comment)
+
+7. Bot 在 thread 回一條摘要訊息：
+   「✅ 已寫入 5 條建議到《合理性檢核 BRD》
+    • UPDATE 業務邏輯              (confidence 0.92)
+    • INSERT 產品代號判斷準則      (confidence 1.00)
+    • UPDATE 產品判斷準則          (confidence 0.85)
+    • UPDATE 例外處理              (confidence 0.95)
+    • UPDATE 初步技術評估          (confidence 0.90)
+    [📄 Open in Google Docs]」
+
+8. BA 點按鈕跳到 Doc → 在 Suggesting mode 下逐條 Accept / Reject
+   (Agent 不參與這一步；audit 由 Docs Revision History 提供)
+```
+
+---
+
+## 8. 資料模型 (Data Model)
+
+兩層：**business 表**由我們設計、**LangGraph checkpoint 表**由 PostgresSaver 自動建立 + 維護。
+
+### 8.1 Business 表（自管）
+
+```sql
+meetings
+  id (uuid)                -- 同時當作 LangGraph 的 thread_id
+  uploaded_by (slack_user_id)
+  audio_url (本機路徑或 Postgres BYTEA reference)
+  transcript_url
+  title
+  created_at
+  status (received | processing | done | failed)
+  langgraph_thread_id      -- = id (顯式記錄方便 debug)
+  brd_doc_id               -- Google Doc ID
+  brd_doc_revision_id      -- 抓 Doc 當下的 revision，用於溯源
+  brd_tab_id               -- nullable；本期固定 NULL（單 Tab 模板，§3.3）；未來啟用 Tabs 時填值
+
+edit_proposals
+  id
+  meeting_id (FK)
+  target_kind              -- 目前固定 'paragraph'；預留 'table_row_append' / 'table_cell'（§2.2 / §12.1 R-5）
+  tab_id                   -- nullable；本期固定 NULL
+  section_heading          -- 該 edit 落在哪個 heading 文字（H1 或 H2，§3.3）
+  operation                -- insert | update | delete
+  anchor_text              -- 章節 body (paragraph) 內用於定位的原文 substring
+  replacement_text         -- 新內容；delete 時為空
+  source_timestamp         -- 錄音中的 hh:mm:ss
+  source_quote             -- 對應的轉錄原文
+  confidence               -- 0.0 ~ 1.0
+  -- Docs 端對應
+  suggestion_id            -- Docs API 寫入後返回的 suggestion ID（成功才有）
+  comment_id               -- 對應的 anchored comment ID
+  applied_at               -- 寫入 Doc 的時間
+  -- 後續觀察（透過 Drive Comments API 拿）
+  docs_status              -- pending | accepted | rejected | unknown
+  docs_status_synced_at
+
+oauth_tokens               -- 每位 BA 的 Google OAuth refresh token
+  slack_user_id (PK)       -- Slack user → Google identity 1:1
+  google_email
+  refresh_token (encrypted)  -- 以 cryptography.fernet 加密；master key 由本機 .env 提供（不入 git）
+  scope                    -- 例如 "docs.write drive.comments"
+  created_at
+  last_used_at
+  revoked_at               -- BA 撤回授權時記錄
+```
+
+### 8.2 LangGraph state schema（in-memory，Pydantic）
+
+```python
+class BRDAgentState(TypedDict):
+    meeting_id: str
+    slack_user_id: str             # 用來查 oauth_tokens
+    audio_url: str | None
+    transcript: Transcript | None
+    # Doc 端
+    brd_doc_id: str
+    brd_tab_id: str | None         # 本期固定 None（單 Tab 模板）；保留欄位以利後續啟用 Tabs
+    doc_snapshot: DocSnapshot | None    # fetch_doc node 抓回的整份 Doc
+    doc_revision_id: str | None
+    prior_reject_reasons: list[str]     # 從 Drive comments API 抓上輪 rejected 的 reason
+    # LLM 萃取結果
+    proposals: EditProposals | None
+    # 寫入結果
+    written_suggestions: list[WrittenSuggestion]    # {suggestion_id, comment_id, edit_index}
+    doc_url_with_anchor: str | None      # 跳到第一條建議的深連結，供 Slack 顯示
+```
+
+### 8.3 LangGraph checkpoint 表（PostgresSaver 自動建立）
+
+由 `PostgresSaver.create_tables(conn)` 一次性建立，包含：
+
+- `checkpoints` —— 每個 node 執行前後的 state snapshot
+- `checkpoint_blobs` —— 大 payload (transcript / BRD 內容) 的 blob 儲存
+- `checkpoint_writes` —— 多步驟 run 中的 pending writes（multi-task / 並行 step 用；本專案 4 node 線性流程下幾乎不會用到，但 schema 仍由 PostgresSaver 統一建立）
+
+我們**只需要 own 連線字串**，schema 由 LangGraph 管。Migration 時跟著 langgraph 版本走即可。
+
+---
+
+## 9. 里程碑 (Milestones)
+
+> **時程目標**：預計約 2 週交付一個可用的內部 PoC
+> 
+
+| Phase | 內容 | 工時 |
+| --- | --- | --- |
+| **P1 — LangGraph 骨架 + Docs API 串接** (W1) | LangGraph state + 4 個 node (`transcribe` / `fetch_doc` / `extract_edits` / `apply_as_suggestions`)、OAuth flow、CLI 跑通、Slack bot 接 graph entry point | 5 個工作日 |
+| **P2 — Heading 對齊強化 + Suggestion 寫入精度 + 內測** (W2) | heading 樣式辨識魯棒化（過濾空 heading）、anchor_text 精準定位（避免 ambiguous match）、Drive Comments API 讀 reject reason、PostgresSaver、PII masking、真實會議內測 | 5 個工作日 |
+
+> **PoC 完成目標**：2026-05-08 (Fri) 可由 BA 試用。
+> 
+
+---
+
+## 10. 開發時程規劃 (Development Timeline)
+
+> • **Kickoff 日**：2026-04-??
+• **PoC 完成 / BA 試用**：2026-05-??
+• **總工時**：約 10 個工作日
+> 
+
+### 10.1 時程表
+
+### Week 1：LangGraph 骨架 + Docs API 串接 + Slack entry point
+
+| 任務 | 確認 |
+| --- | --- |
+|   • ASR (Gemini audio)  
+  • LangGraph 環境裝起來 
+  • Docs API spike（讀取 sample Doc，依 §3.3 模板辨識 H1/H2)
+  • OAuth flow 本機跑通 | `transcribe` node + Docs API `documents.get` 都能單獨跑出結果 |
+|   • 定義 `BRDAgentState` 
+  • 寫 `fetch_doc` node（heading 樣式偵測、空 heading 過濾、表格 / 圖片以 placeholder 標示、序列化成 LLM 輸入格式）
+  • 寫  `extract_edits` node（LLM structured output 含 `doc_id` + `section_heading` + `anchor_text`，`target_kind` 固定 `paragraph`） | `graph.invoke()` 從 mp3 + Doc URL 拿到 `proposals` |
+|   • 寫 `apply_as_suggestions` node：每條 edit 計算 Docs API `startIndex` / `endIndex`（從 anchor_text 反推）
+  • 組 `batchUpdate` 寫成 Suggesting mode + `comments.create` 加 anchored comment | CLI 一條龍：mp3 + Doc URL → 真實 Doc 上看到 N 條建議 + comments |
+|   • Slack bot 骨架 (slack-bolt)
+  • slash command 收 Doc URL
+  • 檔案上傳處理、OAuth flow 與 Slack 整合（首次使用跳 consent URL） | `/brd-update <doc-url>` + 上傳 mp3 → bot 回「處理中」 |
+|   • Slack bot 接 graph 完成事件 + 摘要訊息 + 「Open in Google Docs」按鈕
+  • MemorySaver 跑通 end-to-end | **Test #1：BA 用 Slack 觸發 → 在 Google Docs 看到建議** |
+
+### Week 2 ：Heading 對齊強化 + Suggestion 寫入精度 + 測試
+
+| 任務 | 確認 |
+| --- | --- |
+|   • 強化 `fetch_doc`：heading 樣式辨識（過濾空 heading / 重複 heading  / 樣式套用不一致案例…）
+  • Doc 序列化格式優化（讓 LLM 更好讀；表格 / 圖片以結構化 placeholder 註記） | 對 §3.3 標準模板 sample Doc，所有 H1/H2 章節 ID 正確生成；異常 heading 不影響 ID 集合 |
+|   • 度
+  • `apply_as_suggestions` 精度強化：anchor_text ambiguous 時的 fallback、跨段落 edit、insert 位置計算（Heading 後 vs 段落間）
+  • 回寫 `suggestion_id` 到 Postgres | 5 條樣本 edit 全部寫對位置（無 ambiguous match 失敗） |
+|   • 加 Drive Comments API 讀取上輪 reject reasons（餵給下輪 `extract_edits`）
+  •  PostgresSaver 換掉 MemorySaver + OAuth refresh token 自動 refresh | 第二次跑同一 Doc 會避開上次被 reject 的提議 |
+| Bug fix + README + 測試 | **Test #2** |
+
+### 10.2 Go/No-Go Gates
+
+| Gate | 時點 | 通過條件 |
+| --- | --- | --- |
+| **Gate A** (Mid-sprint) | 05/01 (D5) 晚 | end-to-end 流程跑通（Slack 觸發 → Doc 上看到 Suggestions，即使位置不準） |
+| **Gate B** (PoC 完成) | 05/08 (D10) 晚 | ≥ 2 場會議音檔測試 **Suggestion Accept Rate ≥ 50%** |
+
+---
+
+## 11. 成功指標 (Success Metrics)
+
+| Metric | 目標 |
+| --- | --- |
+| 單次處理延遲 (60 分鐘以內錄音) | < 5 分鐘 |
+| **Suggestion Accept Rate** | ≥ 50% |
+| 嚴重幻覺 (假決議) 比率 | < 1% |
+
+---
+
+## 12. 風險與待解問題 (Risks & Open Questions)
+
+### 12.1 風險
+
+- **R-1 LLM 幻覺**：可能編造會議沒講過的決議。**緩解**：每條 edit 強制附原文 quote + timestamp，無法引用就不產出。
+- **R-2 章節對齊錯誤**：edit 套用到錯的章節。**緩解**：confidence 門檻 + section_id heuristic + 人工 review。
+- **R-3 多人同時編輯 BRD**：merge conflict。**緩解**：Suggesting mode 天然支援併發 —— 多個建議可同時存在於同一段，BA 在 Docs UI 端決定取捨；Agent 端不需處理 conflict resolution。
+- **R-4 錄音品質差**：嘈雜環境影響 ASR。**緩解**：在 UI 顯示 ASR confidence，過低時警告。
+- **R-5 表格 / 流程圖類決議無法直接套用**：BRD 大量內容承載於表格（修訂記錄、IO 欄位、判斷規則）與流程圖（§3.3）；本期 Agent 僅處理段落 edit。**緩解**：(a) `target_kind=paragraph` 強制限制；(b) 偵測到「決議目標應為表格 / 流程圖」時改在最近段落留 anchored comment 說明；(c) PoC 通過後以 `target_kind: table_row_append | table_cell` + Docs API `InsertTableRow` / cell-level update 擴充支援（§2.2）。
+- **R-6 BRD heading 樣式套用不一致**：實際檢視 3 份 BRD 發現每份開頭有 6–12 個空 `Heading 1` 段落（當分頁 / 留白用），其中 1 份（案件流程評估）幾乎所有 H1 / H2 文字為空（§3.3）；若直接拿 heading 文字作 section ID，會產生空字串 / 重複 ID。**緩解**：(a) `fetch_doc` 過濾 `heading.text == ""`；(b) 對 heading 文字重複案例以「文件中第 N 個出現」當 fallback ID；(c) BA 第一次跑前目視確認 sample Doc 結構符合 §3.3 模板，不符的 Doc 不接。
+
+---
+
+## 13. Appendix
+
+### A. 範例 Edit Proposal (JSON)
+
+> 情境：《合理性檢核 BRD》—— BA 開完「食品業判斷規則討論會議」後跑 Agent。
+> 
+
+```json
+{
+  "id": "ep_01HW...",
+  "meeting_id": "mt_01HW...",
+  "brd_doc_id": "1abcDEF...",
+  "tab_id": null,
+  "target_kind": "paragraph",
+  "section_heading": "業務邏輯",
+  "operation": "update",
+  "anchor_text": "本次以產品責任險中的「食品業」為處理目標。",
+  "replacement_text": "本次以產品責任險中的「食品業」為處理目標，涵蓋固體食品、液態飲料及保健食品三大類。",
+  "source_timestamp": "00:18:42",
+  "source_quote": "BU 補充說保健食品這次也要納入合理性檢核範圍,不要漏掉。",
+  "confidence": 0.91,
+  "suggestion_id": "kix.suggestion_abc123",
+  "comment_id": "AAAA1234",
+  "applied_at": "2026-04-28T16:23:01Z",
+  "docs_status": "pending"
+}
+```
+
+### B. 範例 Slack 摘要訊息
+
+```
+✅ 已寫入 5 條建議到《合理性檢核 BRD》
+
+  • UPDATE  業務邏輯                  confidence 0.91
+  • INSERT  產品代號判斷準則          confidence 1.00
+  • UPDATE  產品判斷準則              confidence 0.85
+  • UPDATE  例外處理                  confidence 0.95
+  • UPDATE  初步技術評估              confidence 0.90
+
+⚠️ 另有 2 條決議涉及表格 / 流程圖修改（修訂記錄列、判斷規則表新增 row），
+   本期僅在表格上方留 anchored comment 註記，請手動處理。
+
+每條建議旁有 anchored comment 標註來源時間戳 + 原文 quote。
+請在 Google Docs 端逐項 Accept / Reject。
+
+[ 📄 Open in Google Docs ]      ← 深連結，跳到第一條建議
+```
+
+> 注意：所有審核動作在 Google Docs 端完成（Slack 不再有 Approve / Reject 按鈕）。表格 / 流程圖類決議在 PoC 階段僅以 comment 提示，不直接 apply（§2.2 / §12.1 R-5）。
+> 
+
+---
+
+*— End of PRD v0.1 —*

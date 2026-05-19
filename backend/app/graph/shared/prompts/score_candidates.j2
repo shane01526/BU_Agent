@@ -1,0 +1,98 @@
+{# v2.0 2026-05-14 — 候選評分 + AI 必要性 triage #}
+## 任務
+把目前的 pain signals 聚類成 1-3 個候選方向,各打分(5 維 rubric)、判斷**最小可行解類別**、與 AI 必要性。
+
+## 重要立場
+你的目標是**幫 BU 找最便宜可行的解**,不是「想辦法把它包成 AI 案子」。
+如果規則 / RPA / SQL 報表就能解,**該明說、不要硬導 AI**。
+BU 的工程資源有限,做錯方向會浪費好幾週。
+
+## 5 維 rubric(1-5 整數)
+- rule_repeat:BU 流程是否高度重複、可規則化
+- data_avail:訓練 / 推論資料是否現成
+- reversibility:AI 答錯能不能補救、有沒有 audit
+- scale_roi:每月處理量 × 節省工時
+- gap:目前無人 / 工具不足的程度
+
+## solution_class — 7 類由輕到重(必須先選最輕的可行類)
+1. **rule**:規則明確、可窮舉的條件判斷。例:「文件名稱含特定關鍵字 → 歸 X 類」
+2. **rpa**:跨系統搬資料、UI 自動化、無需判斷。例:「每天從 A 系統抓 PDF 上傳到 B」
+3. **pipeline**:ETL / SQL aggregation / 排程批次。例:「每月底彙整客訴量產報表」
+4. **classical_ml**:結構化特徵 + 量大 + 可標註。例:「以特徵欄位預測流失率」
+5. **llm_extract**:非結構化輸入 → 結構化輸出,schema 固定。例:「從合約抽出條款欄位」
+6. **llm_reason**:語意理解 + 多步推理 + 上下文。例:「客訴內容判斷風險等級 + 處理建議」
+7. **agent**:多輪互動 + 工具呼叫 + 跨系統 orchestration。例:「給 BA 用的 BRD 草擬助手」
+
+## ai_necessity 推導(從 solution_class 推,不要反過來)
+- solution_class ∈ {rule, rpa, pipeline} → ai_necessity = **low**(不需要 AI)
+- solution_class = classical_ml → ai_necessity = **medium**(廣義 ML 但不必 LLM)
+- solution_class ∈ {llm_extract, llm_reason, agent} → ai_necessity = **high**
+
+## 判斷流程(請嚴格按此順序)
+對每個 candidate:
+1. 描述要做什麼(direction)
+2. 問:純規則能解嗎?能 → solution_class=rule, ai_necessity=low
+3. 問:跨系統搬資料,沒判斷?能 → rpa, low
+4. 問:批次彙整 / 報表?能 → pipeline, low
+5. 問:有結構化特徵 + 標註?能 → classical_ml, medium
+6. 問:非結構化輸入 + 固定 schema 抽?能 → llm_extract, high
+7. 問:需推理 / 多輪上下文?能 → llm_reason, high
+8. 問:跨系統 orchestration / 多輪 agent?能 → agent, high
+
+**保守原則**:不確定時往輕的選。能用 rpa 就不用 ml,能用 ml 就不用 llm。
+
+## 輸出範例(few-shot)
+
+### 範例 1:應該是 RPA 不是 AI
+{
+  "direction": "理賠案件每日進度彙整通知",
+  "process_target": "理賠系統 → Email 報表",
+  "project_type": "排序",
+  "solution_class": "rpa",
+  "ai_necessity": "low",
+  "solution_rationale": "純粹是固定欄位 SQL + 寄信,沒有判斷,RPA 或排程腳本即可。"
+}
+
+### 範例 2:應該是 pipeline 不是 AI
+{
+  "direction": "每月客訴量趨勢報表",
+  "process_target": "客訴記錄 → 月報",
+  "project_type": "排序",
+  "solution_class": "pipeline",
+  "ai_necessity": "low",
+  "solution_rationale": "GROUP BY 月份 + 類型即可產出趨勢,SQL view 加排程即解。"
+}
+
+### 範例 3:確實需要 LLM
+{
+  "direction": "理賠文件型別自動分類",
+  "process_target": "理賠文件",
+  "project_type": "分類",
+  "solution_class": "llm_extract",
+  "ai_necessity": "high",
+  "solution_rationale": "輸入是非結構化掃描檔(PDF / 影像 / Email),類別 30+ 種且有混淆,規則窮舉成本極高。"
+}
+
+{% if kc %}
+{% include '_knowledge_card.j2' %}
+
+**評分時請特別考量上述「Cathay 內部已建工具」與「該 BU 解決方案偏好」**:
+- 若候選方向已有對應的 cathay_ai_inventory 項目可重用 → gap 分數降低、ai_necessity 可能 medium 而非 high
+- 若候選方向落在該 BU `avoided_solution_classes` → solution_rationale 要解釋為什麼仍推薦
+- 若候選方向落在該 BU `preferred_solution_classes` → ai_necessity 標 high 時 rationale 要點到對應偏好
+{% endif %}
+
+## 上下文
+- BU={{ bu }} 部門 / SME={{ sme_role }}
+- pain signals:
+{% for p in pain_signals %}
+  - {{ p.raw_text }}({{ p.source }})
+{% endfor %}
+
+## 規則複述
+- 候選 1-3 個
+- direction 用「動詞 + 流程目標 + 任務類型」格式
+- project_type ∈ {分類 / 抽取 / 摘要 / 生成 / QA / 排序 / 異常偵測}
+- score 1-5 整數,保守給分
+- solution_class / ai_necessity 嚴格依上述判斷流程
+- solution_rationale 一句話、< 80 字、要點出「為什麼這類就夠 / 為什麼非要 AI」

@@ -1,0 +1,67 @@
+# 壽險 × 分類任務（例：保戶通訊內容風險標記）
+template_id: life_insurance_classification_v1
+bu: 壽險
+project_type: 分類
+
+sections:
+  - id: sec_bg
+    title: 需求背景
+    owner: bu
+    default_status: auto_filled
+    extract_from_explore: [pain_signals, process_target]
+    questions:
+      - 目前風險標記是事前(進件時)還是事後(客訴後)?
+
+  - id: sec_req_analysis
+    title: 需求分析
+    owner: bu
+    default_status: needs_round2
+    extract_from_explore: [direction]
+    questions:
+      - 風險等級是幾級?分級依據是哪些業務規則?
+      - 哪些是「必抓」、哪些是「漏掉可接受」?
+
+  - id: sec_exec
+    title: 執行方式（不含 API 格式）
+    owner: bu
+    default_status: needs_round2
+    questions:
+      - 來源是逐字稿、Email 還是錄音?
+      - 標記後是流向客服 / 法遵 / 風控?
+      - 期望 turnaround time 多久?
+
+  - id: sec_user_cases
+    title: User Cases
+    owner: bu
+    default_status: needs_round2
+    questions:
+      - 最近一個 AI 應該抓但人工才發現的案例?
+      - 哪些通訊內容 AI 必須避開（隱私、特殊條款）?
+
+  - id: sec_exception
+    title: 例外處理
+    owner: bu
+    default_status: needs_round2
+    questions:
+      - AI 標誤(false positive)時,業務端要負什麼成本?
+      - 高風險誤判要怎麼立即翻盤?
+
+  - id: sec_ai_approach
+    title: AI 方法建議
+    owner: ai_team
+    default_status: placeholder
+
+  - id: sec_data_spec
+    title: 資料規格
+    owner: ai_team
+    default_status: placeholder
+
+  - id: sec_io_format
+    title: API / IO 格式
+    owner: cd_team
+    default_status: placeholder
+
+  - id: sec_deploy_ops
+    title: 部署與維運
+    owner: cd_team
+    default_status: placeholder
