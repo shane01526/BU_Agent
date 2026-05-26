@@ -58,7 +58,10 @@ def build_consult_subgraph() -> StateGraph:
         ["load_template", "section_loop", "quality_gate", "build_deliverables"],
     )
     g.add_edge("load_template", "auto_fill_outline")
-    g.add_edge("auto_fill_outline", END)
+    # v9: auto_fill_outline 末端 set current_section_idx + mode=consult_step2,
+    # 接下來在同一個 super-step 直接進 section_loop publish 第一章提問。
+    # 避免 confirm_handoff 兩輪 ainvoke 第 2 輪變 noop 的問題。
+    g.add_edge("auto_fill_outline", "section_loop")
     g.add_edge("section_loop", END)
     g.add_edge("quality_gate", END)
     g.add_edge("build_deliverables", END)

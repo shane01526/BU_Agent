@@ -17,11 +17,17 @@ export function ChatPanel({
   disabled,
   thinking = false,
   onSend,
+  actionBarSlot,
+  innerMaxWidthClass,
 }: {
   messages: ChatMessage[];
   disabled: boolean;
   thinking?: boolean;
   onSend: (text: string) => void;
+  /** textarea 上方插槽。Consult 全寬版用來放 InlineActionBar。 */
+  actionBarSlot?: React.ReactNode;
+  /** 訊息列 / 輸入框 inner wrapper 的 max-width(全寬下置中限寬用)。預設無限。 */
+  innerMaxWidthClass?: string;
 }) {
   const [draft, setDraft] = useState('');
   const listRef = useRef<HTMLDivElement>(null);
@@ -40,41 +46,48 @@ export function ChatPanel({
     setDraft('');
   }
 
+  const innerCls = clsx(innerMaxWidthClass, innerMaxWidthClass && 'mx-auto');
+
   return (
     <div className="flex h-full flex-col">
-      <div ref={listRef} className="flex-1 overflow-y-auto p-4 space-y-3">
-        {messages.length === 0 && !thinking && (
-          <div className="text-sm text-neutral-400">等待 agent 開場…</div>
-        )}
-        {messages.map((m) => (
-          <MessageBubble key={`${m.turn_id}-${m.role}`} msg={m} />
-        ))}
-        {thinking && <ThinkingBubble />}
+      <div ref={listRef} className="flex-1 overflow-y-auto p-4">
+        <div className={clsx('space-y-3', innerCls)}>
+          {messages.length === 0 && !thinking && (
+            <div className="text-sm text-neutral-400">等待 agent 開場…</div>
+          )}
+          {messages.map((m) => (
+            <MessageBubble key={`${m.turn_id}-${m.role}`} msg={m} />
+          ))}
+          {thinking && <ThinkingBubble />}
+        </div>
       </div>
-      <div className="border-t p-3 bg-white">
-        <textarea
-          className="w-full rounded-md border px-3 py-2 text-sm"
-          rows={2}
-          placeholder={disabled ? '等 agent 回覆中…' : '輸入你的回覆，Enter 送出'}
-          value={draft}
-          onChange={(e) => setDraft(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === 'Enter' && !e.shiftKey) {
-              e.preventDefault();
-              submit();
-            }
-          }}
-          disabled={disabled}
-        />
-        <div className="mt-2 flex justify-end">
-          <button
-            type="button"
-            onClick={submit}
-            disabled={disabled || !draft.trim()}
-            className="rounded-md bg-accent px-3 py-1.5 text-sm text-white hover:bg-accent-muted disabled:opacity-50"
-          >
-            送出
-          </button>
+      <div className="border-t bg-white">
+        <div className={clsx('p-3', innerCls)}>
+          {actionBarSlot && <div className="mb-2">{actionBarSlot}</div>}
+          <textarea
+            className="w-full rounded-md border px-3 py-2 text-sm"
+            rows={2}
+            placeholder={disabled ? '等 agent 回覆中…' : '輸入你的回覆，Enter 送出'}
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault();
+                submit();
+              }
+            }}
+            disabled={disabled}
+          />
+          <div className="mt-2 flex justify-end">
+            <button
+              type="button"
+              onClick={submit}
+              disabled={disabled || !draft.trim()}
+              className="rounded-md bg-accent px-3 py-1.5 text-sm text-white hover:bg-accent-muted disabled:opacity-50"
+            >
+              送出
+            </button>
+          </div>
         </div>
       </div>
     </div>

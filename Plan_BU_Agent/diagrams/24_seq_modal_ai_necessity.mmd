@@ -1,0 +1,61 @@
+%% ID: S05 | Title: AiNecessityWarningModal 三選一 | Last updated 2026-05-25
+%% User action：BU 在彈窗點 acknowledge / override / explain
+%% 共用 _run_ai_necessity_decision helper（session_service.py:616），三段式：
+%%   1. _record_bu_option_choice 寫 BU 標籤 trace + bu_turn_recorded
+%%   2. _stream_agent_reply 用對應 prompt LLM stream
+%%   3. clear pending_ai_necessity_decision + 套 extra patch
+%% 第四選項「換個角度重新發想」走 reset_explore（見 S11）
+sequenceDiagram
+    autonumber
+    actor BU
+    participant FE as Frontend<br/>(AiNecessityWarningModal + page.tsx)
+    participant API as FastAPI
+    participant SVC as session_service.py
+    participant G as Graph
+    participant LLM
+    participant Bus as SSE Bus
+
+    Note over BU,Bus: 前置：score_candidates 已 publish ai_necessity_warning<br/>並 patch pending_ai_necessity_decision=True 鎖住 graph<br/>輸入框 disabled、agent 不搶話
+
+    BU->>FE: 點任一選項<br/>(acknowledge/override/explain)
+    FE->>FE: setAwaitingAgenttrue<br/>setAiNecessityWarnnull (modal 立刻關)
+    FE->>API: POST /sessions/{id}/ai-necessity/{kind}
+    API->>API: _spawn(_ai_necessity_decision_bg(sid, kind))<br/>sessions.py:280
+    API-->>FE: 202 AcceptedResponse
+
+    Note over SVC: 對應 service handler 都呼叫<br/>_run_ai_necessity_decision<br/>(session_service.py:616)
+    SVC->>G: aget_state
+    G-->>SVC: state
+    SVC->>SVC: _find_top1_candidate（session_service.py:523）
+
+    alt top is None（防呆）
+        SVC->>G: aupdate_state<br/>{ai_necessity_warned=True,<br/> pending_ai_necessity_decision=False}
+        SVC-->>API: state
+    else 正常路徑
+        SVC->>SVC: _record_bu_option_choice<br/>(session_service.py:548)<br/>label = (寫死的字串)<br/>- acknowledge: 「我了解了，讓我繼續想想」<br/>- override: 「我有理由，還是想用 AI 試試看」<br/>- explain: 「想了解 {solution_class} 跟 AI 的差別」
+        SVC->>G: aupdate_state {history: history + [bu_trace]}
+        SVC->>Bus: publish bu_turn_recorded<br/>{turn_id, text=label}
+        Bus-->>FE: SSE bu_turn_recorded
+        FE->>FE: append BU 泡泡到對話區
+
+        SVC->>SVC: render prompt<br/>- acknowledge → acknowledge_ai_necessity.j2<br/>- override → override_ai_necessity.j2<br/>- explain → explain_solution_class.j2<br/>注入 top1 / pain_signals / last_bu_text
+
+        SVC->>SVC: _stream_agent_reply<br/>(session_service.py:575)<br/>turn_id = bu_turn_id + 1
+        SVC->>LLM: get_llmstate.llm_model.chat_stream
+        loop streaming
+            LLM-->>SVC: chunk
+            SVC->>Bus: publish agent_reply_delta
+            Bus-->>FE: SSE agent_reply_delta<br/>setAwaitingAgentfalse
+        end
+
+        alt LLM 失敗
+            SVC->>SVC: 用 fallback_text 安全句兜底<br/>publish agent_reply_delta
+        end
+
+        SVC->>Bus: publish agent_reply_done
+        Bus-->>FE: SSE agent_reply_done
+
+        SVC->>G: aupdate_state<br/>{history: history + [agent_trace],<br/> ai_necessity_warned=True,<br/> pending_ai_necessity_decision=False<br/>%% 下面三選一只 override 多這項：%%<br/> [+ bu_overrode_ai_necessity=True if override]}
+    end
+
+    Note over FE: 後續 reload：<br/>useQuery 抓到 warned=True && pending=False<br/>SSE replay 的 ai_necessity_warning 被 cache-read guard skip

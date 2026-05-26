@@ -13,9 +13,28 @@ class Settings(BaseSettings):
         "postgresql://bu_agent:bu_agent@localhost:5432/bu_agent"
     )
 
-    llm_mode: Literal["gemini", "mock"] = "mock"
+    # llm_mode 留作 fallback / 強制 mock 之用；正式選模由前端傳的 llm_model 決定。
+    # - "auto"：依 model id 前綴（gpt-* → openai；gemini-* → gemini；其他 → mock）
+    # - "gemini" / "openai"：強制走該後端
+    # - "mock"：強制離線罐頭
+    llm_mode: Literal["auto", "gemini", "openai", "mock"] = "auto"
+
     gemini_api_key: str = ""
-    gemini_model: str = "gemini-2.5-pro"
+    gemini_model: str = "gemini-3.5-flash"
+
+    openai_api_key: str = ""
+    openai_model: str = "gpt-4o-mini"
+
+    # 前端模型選單白名單（CSV）。若為空,fallback 內建預設清單。
+    allowed_models: str = ""
+    default_model: str = "gpt-4o-mini"
+
+    @property
+    def allowed_model_list(self) -> list[str]:
+        items = [m.strip() for m in self.allowed_models.split(",") if m.strip()]
+        if items:
+            return items
+        return ["gpt-4o-mini", "gpt-4o", "gpt-4.1-mini", "gemini-2.5-pro"]
 
     auth_mode: Literal["mock", "sso"] = "mock"
     oidc_issuer: str = ""

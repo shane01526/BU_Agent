@@ -24,6 +24,7 @@ def build_explore_subgraph() -> StateGraph:
     g.add_node("cluster_pain_points", nodes.cluster_pain_points)
     g.add_node("score_candidates", nodes.score_candidates)
     g.add_node("converge_check", nodes.converge_check)
+    g.add_node("acknowledge_and_guide", nodes.acknowledge_and_guide)
     g.add_node("emit_dual_output", nodes.emit_dual_output)
 
     def entry(state: GraphState) -> str:
@@ -50,15 +51,33 @@ def build_explore_subgraph() -> StateGraph:
     g.add_edge("score_candidates", "converge_check")
 
     def after_converge(state: GraphState) -> str:
+        # AI 必要性彈窗已發、等 BU 做選擇:本輪不再產 agent 回覆,
+        # 由三個 modal endpoint 之一接手後續 LLM stream。
+        if state.pending_ai_necessity_decision:
+            return END
+        # Stage 5 收斂彈窗已發、等 BU 做選擇:dismiss / quick_handoff 接手。
+        if state.pending_stage5_decision:
+            return END
         if state.mode == "cold":
             return END
         if state.ready_to_handoff:
             return "emit_dual_output"
+        # v11: stage>=4 + 已有候選時兩條分流:
+        #  - BU 對候選不滿(關鍵字命中)或上一輪被叫選卻沒選 → discovery_loop 換切角發散
+        #  - 其他(BU 在補脈絡 / 確認候選) → acknowledge_and_guide 承接 + 引導
+        # 為什麼:v10 一律走 acknowledge_and_guide,造成 BU 不喜歡候選時 agent 仍只會叫他選。
+        if state.scored_candidates and state.stage >= 4:
+            if nodes.needs_divergent_question(state):
+                return "discovery_loop"
+            return "acknowledge_and_guide"
         return "discovery_loop"
 
     g.add_conditional_edges(
-        "converge_check", after_converge, [END, "emit_dual_output", "discovery_loop"]
+        "converge_check",
+        after_converge,
+        [END, "emit_dual_output", "discovery_loop", "acknowledge_and_guide"],
     )
+    g.add_edge("acknowledge_and_guide", END)
     g.add_edge("emit_dual_output", END)
 
     return g

@@ -1,0 +1,43 @@
+%% ID: S10 | Title: 送 BA | Last updated 2026-05-25
+%% User action：BU 在 BrdLivePreview 點「送 BA」
+%% 對應：submit_session（session_service.py:477）→ build_deliverables → router push /done
+sequenceDiagram
+    autonumber
+    actor BU
+    participant FE as Frontend<br/>(BrdLivePreview + page.tsx)
+    participant API as FastAPI
+    participant SVC as session_service.py
+    participant G as Graph
+    participant DB as Postgres
+    participant Bus as SSE Bus
+    participant Router as Next router
+
+    BU->>FE: 點「送 BA review」
+    FE->>FE: confirm dialog<br/>(「送出後就無法再修改 BRD」)
+    BU->>FE: 確認
+
+    FE->>API: POST /sessions/{id}/submit
+    API->>SVC: submit_session（session_service.py:477）
+
+    SVC->>G: aupdate_state {mode: 'submit'}
+    SVC->>G: ainvoke{}
+    G->>G: entry_router 看 mode='submit'<br/>→ build_deliverables（consult/nodes.py:552）
+    G->>G: 組 BRD markdown（從 outline 拼）<br/>+ summary.json（trace + selected candidate +<br/> ai_necessity_triage 等）<br/>+ flag_for_ba_review（flagged 章節清單）
+    Note over G: 推測會 publish deliverables_ready<br/>(目前 code 中由 mode 切 done 帶動)
+
+    G-->>SVC: state（含 brd_doc_ref / summary_json）
+
+    SVC->>DB: SELECT * FROM deliverables WHERE session_id=...
+    alt 已存在
+        SVC->>DB: UPDATE deliverables 套新 payload
+    else 不存在
+        SVC->>DB: INSERT INTO deliverables
+    end
+    SVC->>DB: UPDATE sessions SET<br/>mode='done', status='done'
+    DB-->>SVC: ok
+
+    SVC-->>API: {brd_doc_ref, summary_json, flag_for_ba_review}
+    API-->>FE: 200 Deliverables
+
+    FE->>Router: router.push/sessions/[id]/done
+    Router-->>BU: 完成畫面<br/>顯示 summary + BRD 連結 + BA handle

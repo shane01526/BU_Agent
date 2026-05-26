@@ -21,6 +21,9 @@ class SessionCreateRequest(BaseModel):
     bu: str = Field(..., description="BU 別（產險/壽險/銀行/證券/投信 …）")
     sme_role: str = Field(..., description="1-2 句角色簡述")
     raw_hint: str | None = Field(None, description="選填的第一句 hint")
+    llm_model: str | None = Field(
+        None, description="選用的 LLM 模型 id；空值則用後端 default_model"
+    )
 
 
 class SessionSummary(BaseModel):
@@ -37,6 +40,7 @@ class SessionFullState(BaseModel):
     bu: str
     sme_role: str
     raw_hint: str | None = None
+    llm_model: str | None = None
     mode: str
     stage: int | None = None
     status: str
@@ -46,6 +50,15 @@ class SessionFullState(BaseModel):
     pain_signals: list[dict] = []
     sections: list[dict] = []
     paragraph_description: str | None = None
+    # AI 必要性彈窗狀態(供前端 reload 時判斷是否要忽略 SSE replay 的 warning)
+    ai_necessity_warned: bool = False
+    pending_ai_necessity_decision: bool = False
+    bu_overrode_ai_necessity: bool = False
+    # Stage 5 卡關彈窗:reload 後忽略 SSE replay 的 stage5_stuck;
+    # pending_stage5_decision 同 ai_necessity 的 pending 概念,讓前端區分
+    # 「已選過(acked && !pending)」與「沒選就重整(pending=true 仍要彈)」
+    stage_5_stuck_acked: bool = False
+    pending_stage5_decision: bool = False
 
 
 # ---- Messages ----

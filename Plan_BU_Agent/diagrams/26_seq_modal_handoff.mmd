@@ -1,0 +1,56 @@
+%% ID: S07 | Title: HandoffConfirmModal 兩選一 | Last updated 2026-05-25
+%% User action：BU 在 emit_dual_output 後彈出的 HandoffConfirmModal 點選項
+%% 兩個選項：
+%%   1. 進入 Consult mode → confirm_handoff → consult subgraph 走 load_template + auto_fill_outline
+%%   2. 再討論一下 → dismiss_handoff → 清 ready_to_handoff，回 Explore 對話
+sequenceDiagram
+    autonumber
+    actor BU
+    participant FE as Frontend<br/>(HandoffConfirmModal + page.tsx)
+    participant API as FastAPI
+    participant SVC as session_service.py
+    participant G as Graph
+    participant LLM
+    participant Bus as SSE Bus
+
+    Note over BU,FE: 前置：emit_dual_output 已 publish handoff_ready<br/>FE setHandoff{paragraph}<br/>BU 看到 200-400 字段落描述
+
+    alt 選項 1：進入 Consult mode
+        BU->>FE: 點「進入 Consult mode」
+        FE->>API: POST /sessions/{id}/handoff/confirm
+        API->>SVC: confirm_handoff（session_service.py:157）
+        SVC->>G: aupdate_state {mode: 'consult_step1'}
+        SVC->>Bus: publish mode_changed {from:'explore', to:'consult_step1'}
+        Bus-->>FE: SSE mode_changed → refetch session
+        SVC->>G: ainvoke{}
+
+        Note over G: Consult subgraph entry（subgraph.py:42）<br/>brd_outline 空 → load_template
+        G->>G: load_template_node（consult/nodes.py:127）<br/>讀 templates/brd/{bu}_{"type"}.yaml<br/>fallback default.yaml
+        G->>G: auto_fill_outline（consult/nodes.py:167）<br/>同 super-step 連到
+        G->>LLM: auto_fill_outline.j2 chat_structured<br/>SectionDraftListOutput
+        LLM-->>G: 章節 drafts
+        G->>Bus: publish outline_ready {sections}
+        Bus-->>FE: SSE outline_ready → setLiveSections + 渲染大綱樹
+
+        G->>G: 設 mode='consult_step2' + current_section_idx<br/>→ 同 super-step 連到 section_loop
+        G->>LLM: section_question.j2 chat_stream
+        loop streaming
+            LLM-->>G: chunk → publish agent_reply_delta {section_id}
+            Bus-->>FE: SSE agent_reply_delta
+        end
+        G->>Bus: publish agent_reply_done {section_id}
+        Bus-->>FE: SSE agent_reply_done<br/>進 Consult Step 2
+
+        SVC-->>API: state
+        API-->>FE: 202 AcceptedResponse
+        FE->>FE: setHandoffnull<br/>UI 換版面為 ConsultFullscreenLayout
+
+    else 選項 2：再討論一下
+        BU->>FE: 點「再討論一下」
+        FE->>API: POST /sessions/{id}/handoff/dismiss
+        API->>SVC: dismiss_handoff（session_service.py:194）
+        SVC->>G: aupdate_state {ready_to_handoff: False}
+        SVC-->>API: state
+        API-->>FE: 202 AcceptedResponse
+        FE->>FE: setHandoffnull<br/>留在 Explore，BU 可繼續對話 / 重選候選
+    end

@@ -1,0 +1,56 @@
+%% ID: S08 | Title: Consult Step 2 章節 inline edit + Accept/Refine/Skip/Flag | Last updated 2026-05-25
+%% User action 1：BU 在某章 inline edit
+%% User action 2：BU 點 Accept / Refine / Skip / Flag 任一按鈕
+%% 對應 backend：edit_section / section_action（session_service.py:305 / 345）
+sequenceDiagram
+    autonumber
+    actor BU
+    participant FE as Frontend<br/>(SectionEditor / ActionButtons)
+    participant API as FastAPI
+    participant SVC as session_service.py
+    participant G as Graph
+    participant Bus as SSE Bus
+
+    Note over BU,FE: 前置：BU 在 Consult Step 2，agent 已對某章<br/>提問或 BU 已看到 draft
+
+    alt User action 1：Inline Edit
+        BU->>FE: 在某章編輯 markdown 後 debounce 800ms
+        FE->>API: PATCH /sessions/{id}/sections/{sid}<br/>{content}
+        API->>SVC: edit_sectiondb, session, sid, content<br/>session_service.py:305
+        SVC->>G: aget_state → outline
+        SVC->>G: aupdate_state<br/>{brd_outline: outline 內 sid 章<br/>更新 draft_content + last_edit_by='bu'}
+        SVC->>Bus: publish section_updated<br/>{section_id, section}
+        Bus-->>FE: SSE section_updated<br/>更新該章 state
+        SVC-->>API: SectionState dict
+        API-->>FE: 200 SectionState
+        FE->>FE: qc.invalidateQueries（refetch session）
+
+    else User action 2：Accept / Refine / Skip / Flag
+        BU->>FE: 點按鈕（其中之一）
+        FE->>API: POST /sessions/{id}/sections/{sid}/action<br/>{action, payload?}
+        API->>SVC: section_actiondb, session, sid, action<br/>session_service.py:345
+        SVC->>G: aget_state → outline
+        SVC->>SVC: status_map["action"]<br/>accept→accepted /<br/>skip→skipped /<br/>flag→flagged_for_ba /<br/>refine→needs_round2
+
+        alt action 不在 {accept, refine, skip, flag}
+            SVC-->>API: ValueError
+            API-->>FE: 400
+        end
+
+        SVC->>SVC: 找下一個 needs_round2 章節（next_idx）<br/>沒有則 next_idx=None
+        SVC->>G: aupdate_state<br/>{brd_outline: 更新後,<br/> current_section_idx: next_idx}
+        SVC->>Bus: publish section_updated<br/>{section_id, section}
+        Bus-->>FE: SSE section_updated → 更新該章
+
+        alt next_idx 非 None
+            SVC->>Bus: publish current_section_changed<br/>{section_id: 下一章}
+            Bus-->>FE: SSE current_section_changed<br/>SectionInlineHeader 立刻跳下一章
+        end
+
+        SVC->>G: ainvoke{} 推進 graph
+        Note over G: Consult subgraph entry：<br/>有 needs_round2 → section_loop 對下一章提問<br/>都已處理 → quality_gate 跑跨章衝突檢查
+        G->>Bus: publish agent_reply_delta×N + done<br/>(section_loop) 或 conflict_detected (quality_gate)
+        Bus-->>FE: SSE → 對話區渲染下一題或顯示衝突提示
+        SVC-->>API: SectionState dict
+        API-->>FE: 200 SectionState
+    end

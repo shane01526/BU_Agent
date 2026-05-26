@@ -1,0 +1,36 @@
+%% ID: L1.3 | Title: Deferred-Reply 彈窗 Pattern | Last updated 2026-05-25
+%% 兩個 modal（AiNecessityWarning / Stage5Stuck）共用的 state machine：
+%% graph 觸發彈窗時 set pending=True 鎖住、不搶話；
+%% BU 點 modal 選項 endpoint 接手 → record BU label + LLM stream → clear pending
+stateDiagram-v2
+    [*] --> Idle: session 建立<br/>flag = False
+
+    state "Idle (graph 自由跑)" as Idle
+    Idle --> AiPending: score_candidates 偵測<br/>top1 ai_nec=low 連續≥2 + 未 warned<br/>(nodes.py:311 patch<br/>pending_ai_necessity_decision=True<br/>+ ai_necessity_warned=True)<br/>publish ai_necessity_warning
+    Idle --> S5Pending: converge_check 偵測<br/>stage 5 連 3 輪未選 + 未 acked<br/>(nodes.py:431 patch<br/>pending_stage5_decision=True)<br/>publish stage5_stuck
+
+    state "AiPending<br/>(等 AI 必要性 modal 選項)" as AiPending
+    AiPending --> AiPending: after_converge<br/>看到 flag 直接 END<br/>(subgraph.py:53)<br/>不產 agent 回覆
+    AiPending --> Idle: BU 點任一選項<br/>POST /ai-necessity/{kind}<br/>_run_ai_necessity_decision<br/>(session_service.py:616)<br/>1. _record_bu_option_choice<br/>2. _stream_agent_reply<br/>3. clear pending=False
+
+    state "S5Pending<br/>(等 Stage 5 modal 選項)" as S5Pending
+    S5Pending --> S5Pending: after_converge<br/>看到 flag 直接 END<br/>(subgraph.py:53)<br/>不產 agent 回覆
+    S5Pending --> Idle: BU 點「再聊一下」<br/>POST /stage5/dismiss<br/>dismiss_stage5_stuck<br/>(session_service.py:752)<br/>1. _record_bu_option_choice<br/>2. _stream_agent_reply (stage5_keep_talking.j2)<br/>3. clear pending=False<br/>+ stage_5_stuck_acked=True
+    S5Pending --> ReadyHandoff: BU 點「先用 #N 試試 BRD」<br/>POST /stage5/quick-handoff<br/>quick_handoff (session_service.py:822)<br/>1. _record_bu_option_choice<br/>2. patch selected_candidate=N<br/>+ ready_to_handoff=True<br/>+ stage_5_stuck_acked=True<br/>+ pending_stage5_decision=False<br/>(不 stream agent reply)<br/>3. ainvoke 觸發 emit_dual_output
+
+    state "ReadyHandoff" as ReadyHandoff
+    ReadyHandoff --> [*]: emit_dual_output<br/>publish handoff_ready<br/>BU 在 HandoffConfirmModal 確認<br/>進入 Consult mode
+
+    note right of AiPending
+        Reload 防呆：
+        SessionFullState expose
+        ai_necessity_warned + pending_ai_necessity_decision
+        前端 SSE handler 用 qc.getQueryData 同步讀
+        - warned && !pending → SKIP（已決策）
+        - warned && pending → 仍要彈（讓 BU 完成決策）
+    end note
+
+    note right of S5Pending
+        Reload 防呆同 AiPending：
+        看 stage_5_stuck_acked + pending_stage5_decision
+    end note

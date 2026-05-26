@@ -5,6 +5,9 @@
 > 依據來源：`BU_Agent/Plan_bu_agent/bu_agent_overview.md` v0.3、`bu_agent_user_stories_and_flow.md` v0.1
 > 目的：針對三個可能的前端配置方式，逐項分析使用者體驗、API 設計、對話 threads 設計等面向，作為前端平台選型決策的參考文件
 > 備註：overview v0.3 §1.1 已否決 Slack、§1.2 已否決 GPTs，本文把兩者作為「假設可選」情境重新檢討，呈現各自的設計壓力與取捨
+
+> **Last updated 2026-05-25** — 同步至 code 現況。本次主要變更：
+> - 新增 §3.5「LLM provider 選擇 UX」(自建前端優勢之一)：模型選單放新建 session 頁、按 provider 分組、缺 key disabled、session-level 綁定
 >
 > **v0.2 修訂**（2026-05-12 同步 overview v0.3 放寬內網假設）：
 > - GPTs 的否決順位調整：**UX deal-breaker（雙欄 layout 不可行）改為第一理由**；資料離境 / 合規調為次要
@@ -150,6 +153,18 @@
 - **合規**：自有前端 + 自有 backend,資料邊界完全由 Cathay 控制。overview v0.3 採 cloud-first 部署（§10.6 方案 A）,須通過資料分級 / 法遵個案 review;若未過可退回 on-prem（方案 B）,application code 不變。相較 GPTs 永遠多一層第三方,自建前端在任一拓撲下都是三者中最乾淨的。
 - **開發成本**：最高 —— 要處理登入、前端 build、web 元件庫、SSE 重連、inline edit 編輯器、BRD 預覽渲染。
 - **BA Agent 延續（§8 Q13）**：同一前端加 BA view 最自然；review / suggesting UI 可與 BU Agent 共用元件。這是 overview 選擇自建的主因之一。
+
+### 3.5 LLM provider 選擇 UX（[新增於 2026-05-25]）
+
+自建前端讓 LLM provider 選擇成為可控的 UX 決策點，這是 GPTs / Slack 都做不到的：
+
+- **模型選單放在新建 session 頁**：BU 在 `/sessions/new` 看下拉，按 provider 分組（OpenAI / Gemini）。模型清單來自 `GET /api/v1/models`（5 分鐘 cache），失敗時 fallback 至 `.env` 的 `ALLOWED_MODELS` 白名單。
+- **Session-level 綁定**：模型在 session 建立當下寫入 `sessions.llm_model`，整個 session 全程使用，避免「中途換模型造成風格漂移」。BRD 章節改寫 / quality_gate / handoff paragraph 都用同一顆 LLM。
+- **缺 key 自動 disabled**：`backends_available` 旗標讓沒設 OPENAI_API_KEY 的環境直接 disable 掉所有 OpenAI 選項，避免 BU 選了之後 LLM 失敗。
+- **後端動態抓 + 過濾**：`models_catalog.list_chat_models()` 直接打 OpenAI / Gemini list-models API，過濾出可走 chat / 多模態語言任務的模型（排除 image / tts / transcribe / embedding / sora / imagen / veo 等）；OpenAI 帳號權限變動或新模型上架不需要改 code。
+- **trade-off**：模型選單把 BU 暴露在「要懂模型差別」的負擔下；目前用 `DEFAULT_MODEL` 做 sane default 規避，BU 不選就走預設。
+
+GPTs / Slack 平台模型由平台方決定，無法做這種 session-level 控制。
 
 ---
 

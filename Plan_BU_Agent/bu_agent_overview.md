@@ -5,6 +5,12 @@
 > 範圍：BU Agent 階段（Explore mode + Consult mode）的整體使用流程、階段交接，與自建前端架構草案
 > 與舊架構關係：本文重新規劃 BU 端體驗，把舊 `Explore_agent` + `Consult_agent` 兩個並列 agent 收斂為**單一 BU Agent 內的兩個 mode**，並棄用 Slack、改採**自建 web 前端**；舊 PRD（`Explore_agent/explore_agent.md` v0.1 / `Consult_agent/consult_agent.md` v0.8 / `BU_Agent_v2_題庫.md`）作為功能細節的設計參考，**不被本文取代**
 
+> **Last updated 2026-05-25** — 同步至 code 現況。本次主要變更：
+> - §4.1.4 雙輸出 structured JSON 補 `ai_necessity_triage` 欄位（含 `selected_solution_class` / `selected_ai_necessity` / `selected_rationale` / `bu_overrode`）
+> - §5.1 交接觸發點補完整三個 modal（HandoffConfirm / AiNecessityWarning / Stage5Stuck）的觸發條件、按鈕、deferred-reply pattern
+> - §10.3 LLM 換為「多後端（Gemini + OpenAI + auto 路由）」+ 動態模型清單
+> - 新增 §11 里程碑：M3 完成、M4 標記為「多 LLM 後端 + 模型選單 + deferred-reply 彈窗 pattern」
+
 > **v0.3 修訂重點**（2026-05-12 放寬內網限制假設）：
 > - 移除「必須內網部署」硬性假設；預設改為 **cloud 部署**（待法遵與資安個案核可），但保留 on-prem / private cloud 作為備援部署拓撲
 > - §1.2「為何不用 GPTs」改寫：主論點從「金控合規 deal-breaker」改為「雙欄 live 預覽 UX 無法成立」為第一否決點；合規改為次要論點（仍需個案核可）
@@ -192,6 +198,11 @@ predicted_consult_fields:            # 對應 Consult mode 預填欄位
   process_target: 理賠文件型別
   project_type: 分類
   one_line_goal: 自動將每月 5000 件理賠文件依型別歸檔
+ai_necessity_triage:                 # [新增於 2026-05-25] AI 必要性 triage 結果（給 BA Agent / AI 科 review）
+  selected_solution_class: classical_ml   # 7 類之一：rule / rpa / pipeline / classical_ml / llm_extract / llm_reason / agent
+  selected_ai_necessity: medium       # low / medium / high；low 連 2 輪 → 觸發 AI 必要性彈窗
+  selected_rationale: "規則邏輯明確,但長尾文件變化多,classical_ml 比 rule 更穩"
+  bu_overrode: false                  # 若 BU 看過警示仍堅持用 AI（override），此欄為 true
 trace:                                # 機制 1：完整對話追蹤（責任歸屬）
   rounds: [...]
   agent_reframes: [...]
@@ -281,6 +292,21 @@ Agent 接收 Explore 雙輸出後：
 3. BU 點「進入 Consult mode」 → progress bar 自動推進、工作區換版面為「BRD 大綱樹」、agent 開始 Step 1 自動填章節
 
 > **設計原則**：交接是**單向**的（Explore → Consult 不可逆）。若 BU 在 Consult Step 1 看到大綱後想推翻方向，需在 UI 點「重新探索」按鈕，agent 才會回到 Explore mode 並把當前候選標 cold。
+
+### 5.4 三個彈窗類型（[新增於 2026-05-25]）
+
+Explore mode 過程中可能觸發三種彈窗,每種有不同的設計目的：
+
+| 彈窗 | 觸發時機 | 設計目的 | BU 可選項 | Pattern |
+| --- | --- | --- | --- | --- |
+| **HandoffConfirmModal** | `emit_dual_output` 完成（BU 在 stage 5 選定 candidate） | 確認進 Consult mode；交接決策點 | 進入 Consult mode / 再討論一下 | 即時 |
+| **AiNecessityWarningModal** | `score_candidates` 偵測 top1 連續 2 輪 ai_necessity=low | 提醒 BU「這需求可能不需要 AI、用更輕的方案就夠」，避免過度導 AI | 我了解了讓我繼續想想 / 我有理由還是想用 AI / 想了解差別 / 換個角度重新發想 | **Deferred-reply** |
+| **Stage5StuckModal** | `converge_check` 在 stage 5 連 3 輪未選 candidate | 偵測 BU 選不出方向時提供軟性出口 | 再聊一下我想想 / 先用 #N 試試 BRD / 換個角度重新發想 | **Deferred-reply** |
+
+**Deferred-reply pattern**（後兩個彈窗共用）：
+- 觸發彈窗時 graph 立刻停（透過 `pending_*_decision` flag），**不**對「觸發彈窗的 BU 訊息」做即時 agent 回覆
+- BU 點選項後對應 endpoint 才：(1) 寫 BU 選項標籤進 history（讓對話順序完整、reload 後可重播）→ (2) LLM stream 一段帶脈絡的 agent 回覆（quick_handoff 例外不 stream，直接走 emit_dual_output）→ (3) clear pending flag
+- 詳細 endpoint / prompt / 按鈕對應見 `agent_dialog_logic.md` §7
 
 ### 5.2 為何要雙輸出（不只 JSON）
 
@@ -463,12 +489,14 @@ BA Agent 階段預計涵蓋：
 
 ### 10.3 後端 API 形態（草案）
 
-維持舊架構技術棧（LangGraph + PostgresSaver + Gemini 2.5 Pro），前端透過：
+維持舊架構技術棧（LangGraph + PostgresSaver），LLM 已擴展為**多後端**（Gemini 2.5 Pro + OpenAI GPT-4o / GPT-4.1 / o1·o3·o4-mini reasoning，由 `LLM_MODE=auto` 依 model id 前綴自動分流；每個 session 在新建時綁定一個模型，全程使用，避免風格漂移）。
 
-- **REST**：sessions CRUD、開場 metadata 提交、export 觸發、handoff 至 BA Agent
-- **SSE 或 WebSocket**：agent 回覆 streaming、mode 切換事件、章節即時更新（細節 §8 Q11）
+前端透過：
 
-LangGraph `interrupt()` 仍是 HITL 主機制；interrupt point 不再對應 Slack 訊息回覆，而對應 web UI 的對話區 reply 或工作區按鈕事件。
+- **REST**：sessions CRUD、開場 metadata 提交（含 `llm_model` 欄位）、export 觸發、handoff 至 BA Agent；另有 `GET /api/v1/models` 動態抓 OpenAI / Gemini 可用模型清單給前端 New Session 頁的下拉選單
+- **SSE 或 WebSocket**：agent 回覆 streaming、mode 切換事件、章節即時更新、彈窗事件（`ai_necessity_warning` / `stage5_stuck`）、BU 選項標籤回放（`bu_turn_recorded`）
+
+LangGraph `interrupt()` 仍是 HITL 主機制；interrupt point 不再對應 Slack 訊息回覆，而對應 web UI 的對話區 reply 或工作區按鈕事件。彈窗的 deferred-reply 透過 `pending_*_decision` state flag + `after_converge` early END 達成（不用 interrupt）。
 
 ### 10.4 持久化與 Resume
 

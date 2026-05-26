@@ -1,0 +1,64 @@
+%% ID: S11 | Title: Reset Explore + Cold Exit（兩個例外路徑合併）| Last updated 2026-05-25
+%% Path A：BU 主動點「重新探索」/「換個角度重新發想」 → reset_explore
+%% Path B：graph 偵測 2 連續否定 → mode=cold（被動）
+sequenceDiagram
+    autonumber
+    actor BU
+    participant FE as Frontend<br/>(page.tsx + 任一 modal)
+    participant API as FastAPI
+    participant SVC as session_service.py
+    participant G as Graph<br/>(LangGraph)
+    participant LLM
+    participant Bus as SSE Bus
+
+    %% ============ Path A: Reset Explore ============
+    rect rgb243, 232, 255
+    Note over BU,Bus: Path A：reset_explore（C3 escape hatch）<br/>觸發點 1：Consult Step 1 期間頂部按鈕<br/>觸發點 2：HandoffConfirmModal「再討論一下」？實際是 dismiss_handoff，這裡不適用<br/>觸發點 3：AiNecessityWarningModal「換個角度重新發想」<br/>觸發點 4：Stage5StuckModal「換個角度重新發想」
+
+    BU->>FE: 點任一觸發按鈕
+    FE->>FE: confirm dialog（不可逆提醒）<br/>關 modal（如果有）
+    BU->>FE: 確認
+    FE->>API: POST /sessions/{id}/explore/reset
+    API->>SVC: reset_explore（session_service.py:853）
+
+    SVC->>G: aupdate_state（清掉幾乎所有 explore state）<br/>{mode='explore', stage=1,<br/> selected_candidate=None,<br/> ready_to_handoff=False,<br/> candidate_directions=[],<br/> scored_candidates=[],<br/> structured_json=None,<br/> paragraph_description=None,<br/> brd_outline=[],<br/> history=[],<br/> pain_signals=[],<br/> pending_question=None,<br/> current_section_idx=None}
+    Note over SVC: 注意：ai_necessity_warned /<br/>stage_5_stuck_acked 不重置（同 session 不再彈相同警示）
+
+    SVC->>SVC: session.mode='explore', stage=1<br/>db.commit()
+    SVC->>Bus: publish mode_changed<br/>{from:'consult_step1', to:'explore', reason:'user_reset'}
+    Bus-->>FE: SSE mode_changed → refetch session
+
+    SVC->>G: ainvoke{} → 重啟 explore graph<br/>history 空 → 走 discovery_loop 出新第一題
+    G->>LLM: explore_question.j2 chat_stream
+    loop streaming
+        LLM-->>G: chunk → publish agent_reply_delta
+        Bus-->>FE: SSE agent_reply_delta
+    end
+    G->>Bus: publish agent_reply_done
+    Bus-->>FE: SSE agent_reply_done
+
+    SVC-->>API: state
+    API-->>FE: 202 AcceptedResponse
+    FE->>FE: UI 切回 Explore layout<br/>對話區只剩 agent 新第一題
+    end
+
+    %% ============ Path B: Cold Exit ============
+    rect rgb254, 226, 226
+    Note over BU,Bus: Path B：cold_exit（被動，graph 內部偵測）<br/>觸發點：BU 連續 2 輪否定（converge_check 偵測）
+
+    BU->>FE: 送訊息（含「不太對」「沒想法」「no」等）
+    FE->>API: POST /sessions/{id}/messages（同 S03）
+    API->>SVC: run_turn → graph
+
+    Note over G: converge_check（nodes.py:431）<br/>歷史最後 2 個 BU turn 都含否定關鍵字
+    G->>G: 設 mode='cold'
+    G->>Bus: publish cold_exit {reason}
+    Bus-->>FE: SSE cold_exit → refetch session
+    Note over G: after_converge 看到 mode=cold → END
+
+    SVC->>SVC: session.status='cold'<br/>db.commit()
+    SVC->>Bus: publish turn_done
+    Bus-->>FE: SSE turn_done
+
+    Note over FE: UI 顯示「建議離線找 BA」<br/>(ColdExitModal 或 banner)<br/>BU 可回 sessions list
+    end

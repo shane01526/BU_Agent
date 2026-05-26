@@ -1,18 +1,16 @@
 'use client';
 
 import clsx from 'clsx';
-import { useEffect, useState } from 'react';
+import { useState } from 'react';
 
 import type { SectionAction, SectionState } from '@/lib/api';
 
-const STATUS_LABELS: Record<string, { label: string; cls: string }> = {
-  auto_filled: { label: '已預填', cls: 'bg-emerald-100 text-emerald-700' },
-  needs_round2: { label: '待訪談', cls: 'bg-amber-100 text-amber-700' },
-  placeholder: { label: 'AI/CD 科', cls: 'bg-neutral-100 text-neutral-500' },
-  accepted: { label: '已 Accept', cls: 'bg-sky-100 text-sky-700' },
-  skipped: { label: 'Skipped', cls: 'bg-neutral-200 text-neutral-600' },
-  flagged_for_ba: { label: 'Flag → BA', cls: 'bg-rose-100 text-rose-700' },
-};
+import {
+  ActionBtn,
+  getStatusBadge,
+  isSectionActionable,
+  useSectionDraft,
+} from './section-primitives';
 
 interface Props {
   sections: SectionState[];
@@ -96,25 +94,10 @@ function SectionRow({
   onAction: (action: SectionAction) => Promise<void> | void;
 }) {
   const [editing, setEditing] = useState(false);
-  const [draft, setDraft] = useState(section.content_md);
-  const status = STATUS_LABELS[section.status] || {
-    label: section.status,
-    cls: 'bg-neutral-100',
-  };
-
-  // section.content_md 從 server 變動時同步進 draft（agent 寫入或其他 SSE 推送）
-  useEffect(() => {
-    if (!editing) {
-      setDraft(section.content_md);
-    }
-    // editing 為 true 時 BU 正在編輯,不要覆蓋他的 input
-  }, [section.content_md, editing]);
-
+  const [draft, setDraft] = useSectionDraft(section.content_md, editing);
+  const status = getStatusBadge(section.status);
   const isPlaceholder = section.status === 'placeholder';
-  const canAct =
-    section.status === 'auto_filled' ||
-    section.status === 'needs_round2' ||
-    section.status === 'flagged_for_ba';
+  const canAct = isSectionActionable(section.status);
 
   return (
     <div
@@ -201,24 +184,3 @@ function SectionRow({
   );
 }
 
-function ActionBtn({
-  label,
-  onClick,
-  variant = 'default',
-}: {
-  label: string;
-  onClick: () => void;
-  variant?: 'default' | 'primary' | 'warn';
-}) {
-  const cls =
-    variant === 'primary'
-      ? 'bg-emerald-600 text-white hover:bg-emerald-500'
-      : variant === 'warn'
-        ? 'bg-rose-50 text-rose-700 border border-rose-200 hover:bg-rose-100'
-        : 'border hover:bg-neutral-50 text-neutral-700';
-  return (
-    <button onClick={onClick} className={`rounded px-3 py-1 text-xs ${cls}`}>
-      {label}
-    </button>
-  );
-}

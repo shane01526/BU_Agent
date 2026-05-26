@@ -9,6 +9,7 @@ M4 起改用 Gemini:
 
 from __future__ import annotations
 
+import re
 from datetime import UTC, datetime
 
 from app.core.logging import get_logger
@@ -32,6 +33,82 @@ log = get_logger(__name__)
 
 def _now_iso() -> str:
     return datetime.now(UTC).isoformat()
+
+
+def _previous_qa_for_section(history, sid: str) -> list[dict]:
+    """從 history 抽出該章節的 Q&A 序列(role / text);舊 trace 缺 section_id 自動略過。"""
+    out: list[dict] = []
+    for h in history:
+        h_sid = (
+            getattr(h, "section_id", None)
+            if not isinstance(h, dict)
+            else h.get("section_id")
+        )
+        if h_sid != sid:
+            continue
+        role = getattr(h, "role", None) or (h.get("role") if isinstance(h, dict) else None)
+        text = (
+            getattr(h, "raw_text", None)
+            or (h.get("raw_text", "") if isinstance(h, dict) else "")
+        )
+        if role and text:
+            out.append({"role": role, "text": text})
+    return out
+
+
+# 短回覆 / 客套字判定;用於規則 5b 決定 BU 是否真的還有東西可講
+_SHORT_BU_HINT_RE = re.compile(
+    r"^(嗯+|哦|喔|好|ok|okay|yes|對|是|不知道|沒有|沒|還好|看你|你決定|都可以)\b",
+    re.IGNORECASE,
+)
+
+
+def _last_bu_text_in_section(previous_qa: list[dict]) -> str:
+    for qa in reversed(previous_qa):
+        if qa.get("role") == "bu":
+            return qa.get("text", "")
+    return ""
+
+
+def _is_short_or_idle(text: str) -> bool:
+    t = text.strip()
+    if len(t) <= 20:
+        return True
+    return bool(_SHORT_BU_HINT_RE.match(t))
+
+
+def _count_accept_hints(previous_qa: list[dict]) -> int:
+    """數 agent 在本章已提示過幾次「資訊夠了 / 要不要 Accept」。"""
+    n = 0
+    for qa in previous_qa:
+        if qa.get("role") != "agent":
+            continue
+        text = qa.get("text", "")
+        if any(kw in text for kw in ("Accept", "資訊夠了", "資訊足夠", "夠了嗎", "想 Accept")):
+            n += 1
+    return n
+
+
+def _bu_replies_since_last_accept_hint(previous_qa: list[dict]) -> int:
+    """從 previous_qa 倒序,找最後一個 agent 含「Accept / 夠了」字眼的 turn,
+    回傳那之後 BU 已回過幾次。
+
+    用途:revisit 場景下章節 history 累積了過去 Accept 提示;這個值能讓
+    section_loop 判斷「自從上次提示 Accept 後 BU 是否新講了內容」,
+    決定是否進「續訪開場」prompt。
+    """
+    last_hint_idx = -1
+    for i, qa in enumerate(previous_qa):
+        if qa.get("role") != "agent":
+            continue
+        text = qa.get("text", "")
+        if any(kw in text for kw in ("Accept", "資訊夠了", "資訊足夠", "夠了嗎", "想 Accept")):
+            last_hint_idx = i
+    if last_hint_idx < 0:
+        # 沒任何 hint 過 → 整段 BU 回應都是 fresh
+        return sum(1 for x in previous_qa if x.get("role") == "bu")
+    after = previous_qa[last_hint_idx + 1 :]
+    return sum(1 for x in after if x.get("role") == "bu")
 
 
 def _section_to_state(s_tpl, status: str, content: str = "") -> SectionState:
@@ -134,7 +211,7 @@ async def auto_fill_outline(state: GraphState) -> dict:
         kc=kc,
     )
     try:
-        llm = get_llm()
+        llm = get_llm(state.llm_model)
         result = await llm.chat_structured(
             [{"role": "user", "content": user}], SectionDraftListOutput
         )
@@ -172,6 +249,17 @@ async def auto_fill_outline(state: GraphState) -> dict:
 
     next_idx = next(
         (i for i, s in enumerate(new_outline) if s.status == "needs_round2"), None
+    )
+    # v6 防禦:即便沒有 needs_round2 章節(意外狀況),只要 outline 非空就指第 0 個,
+    # 避免 section_loop 因 idx=None silent skip,讓 chat 變空白
+    if next_idx is None and new_outline:
+        next_idx = 0
+
+    log.info(
+        "auto_fill_outline.done",
+        outline_n=len(new_outline),
+        next_idx=next_idx,
+        needs_round2_n=sum(1 for s in new_outline if s.status == "needs_round2"),
     )
 
     await bus.publish(
@@ -226,7 +314,20 @@ def _heuristic_draft(
 async def section_loop(state: GraphState) -> dict:
     """對當前 needs_round2 章節用 LLM 產一道問題,streaming 推 SSE。"""
     idx = state.current_section_idx
+    log.info(
+        "section_loop.enter",
+        session_id=state.session_id,
+        current_section_idx=idx,
+        outline_n=len(state.brd_outline),
+        mode=state.mode,
+    )
     if idx is None or idx >= len(state.brd_outline):
+        log.warning(
+            "section_loop.skip",
+            reason="no_idx_or_oob",
+            idx=idx,
+            outline_n=len(state.brd_outline),
+        )
         return {}
 
     sec = state.brd_outline[idx]
@@ -240,19 +341,88 @@ async def section_loop(state: GraphState) -> dict:
     sec_tpl = next((s for s in tpl.sections if s.id == sid), None)
     seed_questions = sec_tpl.questions if sec_tpl else []
 
-    # 本章 BU 已回幾次:用 history 中 role=bu 且 mode=consult_step2 計
-    rounds_so_far = sum(
-        1
-        for h in state.history
-        if (
-            getattr(h, "role", None) == "bu"
-            or (isinstance(h, dict) and h.get("role") == "bu")
-        )
-        and (
-            getattr(h, "mode", None) == "consult_step2"
-            or (isinstance(h, dict) and h.get("mode") == "consult_step2")
-        )
+    # 本章節 Q&A 序列(取 last 10 筆),取代舊的全 history 計數
+    previous_qa = _previous_qa_for_section(state.history, sid)[-10:]
+    rounds_in_this_section = sum(1 for x in previous_qa if x["role"] == "bu")
+    was_visited = (
+        rounds_in_this_section >= 1 or len(section_draft or "") > 100
     )
+    accept_hint_count = _count_accept_hints(previous_qa)
+    last_bu_text = _last_bu_text_in_section(previous_qa)
+    last_bu_is_short = _is_short_or_idle(last_bu_text) if last_bu_text else False
+    # is_fresh_revisit:was_visited + 從上次 Accept 提示後 BU 還沒新講太多話
+    # → 用於 prompt 規則「續訪開場」與「不要立刻收斂」
+    bu_replies_since_revisit = _bu_replies_since_last_accept_hint(previous_qa)
+    is_fresh_revisit = was_visited and bu_replies_since_revisit < 2
+
+    # Auto-advance:agent 已提示 ≥ 2 次「Accept / 資訊夠了」+ BU 仍短答/客套
+    # → 強制把本章標 accepted、跳下一章,避免卡住。
+    # 改完後仍會繼續往下跑(但 idx 已切到下一章),不直接 return
+    # 以便對「新的下一章」publish 第一道訪談題,讓 chat 不空白。
+    auto_advanced = False
+    if (
+        accept_hint_count >= 2
+        and last_bu_is_short
+        and not is_fresh_revisit
+    ):
+        new_outline_pre = list(state.brd_outline)
+        sec_obj = sec if isinstance(sec, SectionState) else SectionState.model_validate(sec)
+        updated_sec = sec_obj.model_copy(update={"status": "accepted"})
+        new_outline_pre[idx] = updated_sec
+        next_idx = next(
+            (i for i, s in enumerate(new_outline_pre) if (
+                getattr(s, "status", None) or s.get("status")) == "needs_round2"
+            ),
+            None,
+        )
+        await bus.publish(
+            state.session_id,
+            "section_updated",
+            {"section_id": sid, "section": updated_sec.model_dump()},
+        )
+        if next_idx is not None and 0 <= next_idx < len(new_outline_pre):
+            next_sid = (
+                getattr(new_outline_pre[next_idx], "section_id", None)
+                or new_outline_pre[next_idx]["section_id"]
+            )
+            await bus.publish(
+                state.session_id,
+                "current_section_changed",
+                {"section_id": next_sid},
+            )
+        log.info(
+            "section_loop.auto_advance",
+            session_id=state.session_id,
+            from_section=sid,
+            to_section_idx=next_idx,
+            accept_hint_count=accept_hint_count,
+        )
+        # 沒下一個 needs_round2 → 整段訪談完成,本輪不再 stream 提問,
+        # 等下次 ainvoke entry 走 quality_gate。
+        if next_idx is None:
+            return {
+                "brd_outline": new_outline_pre,
+                "current_section_idx": None,
+            }
+        # 切到下一章後 reload 該章 context,改用新 sid 跑下面 prompt 流程
+        idx = next_idx
+        sec = new_outline_pre[idx]
+        sid = getattr(sec, "section_id", None) or sec["section_id"]
+        title = getattr(sec, "title", None) or sec["title"]
+        section_draft = (
+            getattr(sec, "draft_content", None) or sec.get("draft_content", "")
+        )
+        sec_tpl = next((s for s in tpl.sections if s.id == sid), None)
+        seed_questions = sec_tpl.questions if sec_tpl else []
+        previous_qa = _previous_qa_for_section(state.history, sid)[-10:]
+        rounds_in_this_section = sum(1 for x in previous_qa if x["role"] == "bu")
+        was_visited = rounds_in_this_section >= 1 or len(section_draft or "") > 100
+        accept_hint_count = _count_accept_hints(previous_qa)
+        last_bu_text = _last_bu_text_in_section(previous_qa)
+        last_bu_is_short = _is_short_or_idle(last_bu_text) if last_bu_text else False
+        bu_replies_since_revisit = _bu_replies_since_last_accept_hint(previous_qa)
+        is_fresh_revisit = was_visited and bu_replies_since_revisit < 2
+        auto_advanced = True
 
     user = render(
         "section_question",
@@ -262,7 +432,12 @@ async def section_loop(state: GraphState) -> dict:
         project_type=project_type,
         section_draft=section_draft,
         seed_questions=seed_questions,
-        rounds_so_far=rounds_so_far,
+        previous_qa=previous_qa,
+        rounds_in_this_section=rounds_in_this_section,
+        was_visited=was_visited,
+        accept_hint_count=accept_hint_count,
+        last_bu_is_short=last_bu_is_short,
+        is_fresh_revisit=is_fresh_revisit,
     )
 
     turn_id = len(state.history) + 1
@@ -277,7 +452,7 @@ async def section_loop(state: GraphState) -> dict:
 
     body = ""
     try:
-        llm = get_llm()
+        llm = get_llm(state.llm_model)
         async for chunk in llm.chat_stream(
             [{"role": "user", "content": user}]
         ):
@@ -315,15 +490,21 @@ async def section_loop(state: GraphState) -> dict:
         raw_text=full,
         timestamp=_now_iso(),
         linked_candidate_id=state.selected_candidate,
+        section_id=sid,
     )
     existing_history = [
         h if isinstance(h, TraceEntry) else TraceEntry.model_validate(h)
         for h in state.history
     ]
-    return {
+    patch: dict = {
         "history": existing_history + [trace],
         "pending_question": full,
     }
+    if auto_advanced:
+        # 把本輪自動 accept + 跳章的結果一併寫回 state
+        patch["brd_outline"] = new_outline_pre
+        patch["current_section_idx"] = idx
+    return patch
 
 
 async def quality_gate(state: GraphState) -> dict:
@@ -349,7 +530,7 @@ async def quality_gate(state: GraphState) -> dict:
     user = render("quality_gate", sections=sections_for_prompt)
     conflicts: list[str] = []
     try:
-        llm = get_llm()
+        llm = get_llm(state.llm_model)
         result = await llm.chat_structured(
             [{"role": "user", "content": user}], ConflictListOutput
         )

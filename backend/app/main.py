@@ -49,11 +49,11 @@ def health() -> dict:
 
 
 @app.get("/health/llm")
-async def health_llm() -> dict:
-    """戳一次 LLM 確認連線 / API key / 模型可用。"""
+async def health_llm(model: str | None = None) -> dict:
+    """戳一次 LLM 確認連線 / API key / 模型可用。可帶 ?model=gpt-4o-mini 指定模型。"""
     from app.graph.shared.llm import get_llm
 
-    llm = get_llm()
+    llm = get_llm(model)
     chunks: list[str] = []
     try:
         async for chunk in llm.chat_stream(
@@ -69,12 +69,27 @@ async def health_llm() -> dict:
         return {
             "status": "error",
             "llm_mode": settings.llm_mode,
-            "model": settings.gemini_model,
+            "backend": llm.kind,
+            "model": llm.model,
             "error": f"{type(e).__name__}: {e}",
         }
     return {
         "status": "ok",
         "llm_mode": settings.llm_mode,
-        "model": settings.gemini_model,
+        "backend": llm.kind,
+        "model": llm.model,
         "sample": "".join(chunks)[:200],
     }
+
+
+@app.get("/api/v1/models")
+async def list_models() -> dict:
+    """前端模型選單來源。
+
+    動態抓 OpenAI / Gemini list-models API,過濾出能做 chat / 多模態語言任務的,
+    結果 cache 5 分鐘。任一供應商失敗,以剩餘可用 + 警示 failures 回傳;
+    全部失敗時 fallback 到 .env 的 ALLOWED_MODELS。
+    """
+    from app.services.models_catalog import list_chat_models
+
+    return await list_chat_models()

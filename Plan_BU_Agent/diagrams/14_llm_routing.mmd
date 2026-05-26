@@ -1,0 +1,92 @@
+%% ID: L1.5 | Title: LLM 多後端路由 | Last updated 2026-05-25
+%% 對應檔：
+%%   - backend/app/core/config.py（LLM_MODE / API key / DEFAULT_MODEL / ALLOWED_MODELS）
+%%   - backend/app/graph/shared/llm.py（_resolve_backend / get_llm / 三個 backend）
+%%   - backend/app/services/models_catalog.py（動態抓 + 過濾 + 5min cache）
+%%   - frontend/src/app/sessions/new/page.tsx（模型選單 UI）
+flowchart TB
+    subgraph FE["Frontend：New Session 頁"]
+        direction TB
+        ListModels[["api.listModels()<br/>GET /api/v1/models"]]
+        Dropdown["模型選單<br/>OpenAI 分組 / Gemini 分組<br/>缺 key 自動 disabled"]
+        SubmitForm["送出 createSession<br/>{bu, sme_role, raw_hint, llm_model}"]
+    end
+
+    subgraph BE_API["Backend API"]
+        direction TB
+        E_Models[["GET /api/v1/models<br/>main.py:list_models"]]
+        E_Create[["POST /sessions<br/>sessions.py:create_session"]]
+    end
+
+    subgraph Catalog["Models Catalog<br/>services/models_catalog.py"]
+        direction TB
+        FetchOA["_fetch_openai_models<br/>httpx GET api.openai.com/v1/models"]
+        FetchGE["_fetch_gemini_models<br/>httpx GET generativelanguage.googleapis.com/v1beta/models"]
+        FilterOA["_is_openai_chat_model<br/>排除 image/tts/transcribe/embedding/<br/>moderation/sora/instruct/babbage/davinci/<br/>deep-research/computer-use/realtime-translate"]
+        FilterGE["_is_gemini_chat_model<br/>排除 image/tts/embedding/imagen/veo/<br/>lyria/robotics/native-audio/gemma/aqa/<br/>nano-banana/computer-use/deep-research"]
+        Cache[("5 分鐘 in-memory cache<br/>_cached kind, fetcher")]
+        FallbackList[("Fallback：.env<br/>ALLOWED_MODELS CSV")]
+    end
+
+    subgraph Service["Service Layer"]
+        direction TB
+        CreateSvc["create_session<br/>session_service.py:24<br/>(llm_model 寫進<br/>sessions.llm_model)"]
+    end
+
+    subgraph LLM["LLM Factory<br/>graph/shared/llm.py"]
+        direction TB
+        Resolve{"_resolve_backend(model)<br/>llm.py:_resolve_backend"}
+        BackOA["_OpenAIBackend<br/>langchain-openai ChatOpenAI<br/>temperature=0.3"]
+        BackGE["_GeminiBackend<br/>langchain-google-genai<br/>ChatGoogleGenerativeAI<br/>temperature=0.3"]
+        BackMK["_MockBackend<br/>離線罐頭<br/>依 stage 回固定題"]
+        ClientCache[("clients dict<br/>cache by kind+model")]
+        Get[["get_llm model<br/>所有節點呼叫處<br/>用 state.llm_model 帶入"]]
+    end
+
+    subgraph Settings["Settings (.env)"]
+        direction TB
+        S_Mode["LLM_MODE<br/>auto / gemini / openai / mock"]
+        S_OAKey["OPENAI_API_KEY"]
+        S_GEKey["GEMINI_API_KEY"]
+        S_Default["DEFAULT_MODEL<br/>e.g. gpt-4o-mini"]
+        S_Allowed["ALLOWED_MODELS<br/>fallback CSV"]
+    end
+
+    ListModels --> E_Models
+    E_Models --> Catalog
+    FetchOA --> FilterOA --> Cache
+    FetchGE --> FilterGE --> Cache
+    Cache -->|fetch fail<br/>2 邊都掛| FallbackList
+    Cache --> Dropdown
+    FallbackList --> Dropdown
+
+    Dropdown --> SubmitForm
+    SubmitForm --> E_Create
+    E_Create --> CreateSvc
+    CreateSvc -->|llm_model 從 payload 拿,<br/>空值用 DEFAULT_MODEL| Get
+
+    Get --> Resolve
+    Resolve -- "前綴 gpt-/o1/o3/o4/<br/>chatgpt-/chat-latest" --> BackOA
+    Resolve -- "前綴 gemini-" --> BackGE
+    Resolve -- "其他 / mode=mock /<br/>對應 key 缺" --> BackMK
+    Resolve -.->|cache lookup| ClientCache
+    BackOA -.- ClientCache
+    BackGE -.- ClientCache
+    BackMK -.- ClientCache
+
+    S_Mode -.-> Resolve
+    S_OAKey -.-> BackOA
+    S_OAKey -.-> FetchOA
+    S_GEKey -.-> BackGE
+    S_GEKey -.-> FetchGE
+    S_Default -.-> CreateSvc
+    S_Allowed -.-> FallbackList
+
+    classDef fe fill:#dbeafe,stroke:#1e40af,color:#1e3a8a
+    classDef cache fill:#fef3c7,stroke:#b45309,color:#78350f
+    classDef backend fill:#d1fae5,stroke:#047857,color:#064e3b
+    classDef config fill:#f3e8ff,stroke:#6b21a8,color:#581c87
+    class ListModels,Dropdown,SubmitForm fe
+    class Cache,FallbackList,ClientCache cache
+    class BackOA,BackGE,BackMK backend
+    class S_Mode,S_OAKey,S_GEKey,S_Default,S_Allowed config

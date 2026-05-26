@@ -9,6 +9,16 @@
 > 範圍：BU Agent 階段（Explore mode + Consult mode）的技術實作藍圖。BA Agent 僅在交接介面處點到為止
 > 定位：主 PRD（待撰寫）的**工程對應版**。Overview 回答「要做什麼」，本文回答「怎麼做、用什麼做、檔案怎麼切、資料怎麼流」
 
+> **Last updated 2026-05-25** — 同步至 code 現況。本次主要變更：
+> - §1 Tech Stack：LLM 改為「Gemini 2.5 Pro / OpenAI GPT-4o / GPT-4.1（auto 路由）」
+> - §3.3 GraphState：補 7 個彈窗相關欄位（4 ai_necessity + 3 stage5）
+> - §3.5 LLM Integration：補 `_OpenAIBackend` / `get_llm(model)` 工廠 / `models_catalog` 動態清單
+> - §3.7 REST API：補 `/api/v1/models`、`/ai-necessity/{acknowledge,override,explain}`、`/stage5/{dismiss,quick-handoff}`、`/health/llm?model=`
+> - §3.8 SSE 事件：補 `ai_necessity_warning` / `stage5_stuck` / `bu_turn_recorded`
+> - §3.6 Prompts：補 `acknowledge_ai_necessity.j2` / `override_ai_necessity.j2` / `explain_solution_class.j2` / `stage5_keep_talking.j2`
+> - §5 DB schema：補 `sessions.llm_model` 欄位（migration `20260525_0002`）
+> - §6 認證 / env：補 `OPENAI_API_KEY` / `OPENAI_MODEL` / `ALLOWED_MODELS` / `DEFAULT_MODEL` / `LLM_MODE=auto`
+
 > **v0.2 修訂重點**（2026-05-12 跟 overview v0.3 放寬內網假設同步）：
 > - §1 Tech stack：`Deployment` 欄改為 cloud 預設（GCP / AWS / Azure 擇一），on-prem 列為備援
 > - §2 架構圖重畫：邊界從「Cathay 內網」改為「Cathay-controlled cloud VPC」；新增對外 SSO / Gemini API 流入流出箭頭
@@ -73,7 +83,7 @@
 
 | 層 | 技術 | 版本 / 備註 | 決策依據 |
 | --- | --- | --- | --- |
-| LLM | Google Gemini 2.5 Pro | 主要生成模型 | overview §10.3 |
+| LLM | **多後端（auto 路由）**：Google Gemini 2.5 Pro / OpenAI GPT-4o / GPT-4o-mini / GPT-4.1 系列 / o1·o3·o4-mini reasoning 模型 | 由 `LLM_MODE` 控制：`auto`（依 model id 前綴自動分流）/ `gemini` / `openai` / `mock`；每個 session 在新建時綁定一個模型，全程使用，避免風格漂移 | overview §10.3、本文 §3.5 |
 | Agent framework | LangGraph | 最新穩定版；採 subgraph 架構 | overview §10.3；舊架構延用 |
 | Persistence | PostgresSaver (LangGraph) | PostgreSQL 15+ | overview §10.4 |
 | Backend server | FastAPI | Python 3.11+ | 舊架構延用、與 LangGraph Python SDK 契合 |
@@ -423,14 +433,37 @@ class GraphState(BaseModel):
     bu: str
     sme_role: str
     raw_hint: str | None = None
+    # 該 session 全程綁定的 LLM 模型 id（前端建 session 時挑一次，中途不換）
+    # [已實作於 2026-05-25] 對應 sessions.llm_model 欄位（migration 0002）
+    llm_model: str | None = None
 
     # explore state
-    history: Annotated[list[TraceEntry], add] = []
-    pain_signals: Annotated[list[PainSignal], add] = []
+    # [實作偏差於 2026-05-14] history / pain_signals 改用「replace semantics」
+    # （非 operator.add reducer），原因見 §3.2.4 與 state.py 檔頭註解
+    history: list[TraceEntry] = []
+    pain_signals: list[PainSignal] = []
     candidate_directions: list[CandidateDirection] = []
     scored_candidates: list[CandidateDirection] = []
     selected_candidate: int | None = None
     ready_to_handoff: bool = False
+
+    # [新增於 2026-05-25] Stage 5 卡關偵測（converge_check 觸發 stage5_stuck modal）
+    # - stage_5_rounds：在 stage 5 已跑過幾輪 discovery_loop
+    # - stage_5_stuck_acked：BU 已在 stuck modal 點過任一選項，本 session 不再彈
+    # - pending_stage5_decision：modal 已發、等 BU 選項；期間 graph 不產 agent 回覆
+    stage_5_rounds: int = 0
+    stage_5_stuck_acked: bool = False
+    pending_stage5_decision: bool = False
+
+    # [新增於 2026-05-25] AI 必要性 triage（score_candidates 觸發 ai_necessity_warning）
+    # - low_ai_necessity_streak：top1 候選連續被 LLM 標 ai_necessity=low 的次數
+    # - ai_necessity_warned：已彈過 warning modal，本 session 不再彈
+    # - bu_overrode_ai_necessity：BU 看過警示仍堅持用 AI（會寫進 BRD structured JSON）
+    # - pending_ai_necessity_decision：modal 已發、等 BU 選項；期間 graph 不產 agent 回覆
+    low_ai_necessity_streak: int = 0
+    ai_necessity_warned: bool = False
+    bu_overrode_ai_necessity: bool = False
+    pending_ai_necessity_decision: bool = False
 
     # dual output
     structured_json: dict | None = None
@@ -478,49 +511,88 @@ class ExploreParagraphOutput(BaseModel):
 
 > Schema 細節以 overview §8 Q5 決議為準；本文採 v0.2 草案作為實作起點。
 
-### 3.5 LLM Integration（Gemini 2.5 Pro）
+### 3.5 LLM Integration（多後端：Gemini + OpenAI）
 
-#### 3.5.1 Client 封裝
+> [改寫於 2026-05-25] 原 §3.5 只設計 `GeminiClient`；現已實作多後端工廠 + 動態模型清單。
+
+#### 3.5.1 多後端工廠 + 統一介面
 
 ```python
 # graph/shared/llm.py
 
-class GeminiClient:
-    def __init__(self, model: str = "gemini-2.5-pro", ...): ...
+class LLMClient:
+    """統一介面;真實後端由 _GeminiBackend / _OpenAIBackend 提供, mock 由 _MockBackend 提供。"""
+    def __init__(self, kind: str, model: str): ...
+    async def chat_stream(self, messages: list[dict]) -> AsyncIterator[str]: ...
+    async def chat_structured(self, messages: list[dict], schema: type[BaseModel]) -> BaseModel: ...
 
-    async def chat_stream(self, messages: list[dict], tools: list | None = None) -> AsyncIterator[str]:
-        """用於對話 streaming 回 SSE"""
 
-    async def chat_structured(self, messages: list[dict], schema: type[BaseModel]) -> BaseModel:
-        """structured output（以 Pydantic schema 強制 JSON）；用於候選評分、outline 填充"""
+def _resolve_backend(model: str | None) -> tuple[str, str]:
+    """依 settings.llm_mode + model id 前綴決定 backend kind:
+    - llm_mode=mock   → 全部 mock
+    - llm_mode=gemini → 強制 Gemini
+    - llm_mode=openai → 強制 OpenAI
+    - llm_mode=auto   → 看 model id 前綴:
+        gpt-* / o1 / o3 / chatgpt-* / chat-latest → openai
+        gemini-*                                  → gemini
+        其他                                       → mock
+    對應 backend 的 API key 缺時 fallback 到 mock + warning。
+    """
+
+# 按 (kind, model) 快取,避免每次 get_llm 都重建 LangChain client
+def get_llm(model: str | None = None) -> LLMClient: ...
 ```
 
-- 所有對 LLM 的呼叫都走這層，方便 mock 與 retry
-- Retry：指數退避，最多 3 次；超過回 `LLMTimeoutError` → SSE 推 `agent_error` 事件
-- Token budget：單輪上限 32K input；超過先截 `history` 最舊段落
+- 三個 backend：`_GeminiBackend`（用 `langchain-google-genai`）、`_OpenAIBackend`（用 `langchain-openai`）、`_MockBackend`（離線罐頭）
+- 每個 session 在新建時綁定一個 `llm_model`（前端 `/sessions/new` 模型選單），全程使用，所有節點呼叫 `get_llm(state.llm_model)`
+- Retry / token budget 仍由各 LangChain client 內建處理；錯誤時 service handler 用 fallback_text 補齊 UI
 
-#### 3.5.2 Prompt 組織
+#### 3.5.2 動態模型清單（`models_catalog.py`）
 
-採 Jinja2 模板放在 `graph/shared/prompts/`：
+```python
+# services/models_catalog.py
+
+async def list_chat_models() -> dict:
+    """回傳 {models, default, backends_available, source ('live'|'fallback'), failures}。
+
+    - 同時打 OpenAI v1/models 與 Gemini v1beta/models API
+    - 過濾出可走 chat / 多模態語言任務的模型(排除 image / tts / transcribe /
+      embedding / moderation / sora / imagen / veo / lyria / robotics 等)
+    - 5 分鐘 in-memory cache;某個供應商失敗只報 failures、其餘照給
+    - 兩邊都失敗 → fallback 到 .env 的 ALLOWED_MODELS 白名單
+    """
+```
+
+過濾規則（寫死在 `_OPENAI_EXCLUDE_SUBSTRINGS` / `_GEMINI_EXCLUDE_SUBSTRINGS`）：
+- OpenAI 保留：`gpt-*`、`o1`、`o3`、`o4`、`chatgpt-*`、`chat-latest`；排除 `embedding` / `moderation` / `transcribe` / `tts` / `-image` / `-search` / `babbage` / `davinci` / `instruct` / `sora` / `deep-research` / `computer-use` / `realtime-translate` / `realtime-whisper`
+- Gemini 保留：`gemini-*` 且支援 `generateContent`；排除 `embedding` / `tts` / `image` / `imagen` / `veo` / `lyria` / `robotics` / `native-audio` / `computer-use` / `deep-research` / `gemma` / `aqa` / `nano-banana`
+
+#### 3.5.3 Prompt 組織
+
+採 Jinja2 模板放在 `graph/shared/prompts/`（**所有 prompt 都已扁平化、不分 explore / consult 子目錄**）：
 
 ```
 prompts/
-├── explore/
-│   ├── system.j2                    # Explore agent persona
-│   ├── discovery_loop.j2            # 每階段提問
-│   ├── extract_signals.j2
-│   ├── score_rubric.j2              # 5 維度評分 structured output
-│   └── emit_paragraph.j2            # 段落描述生成
-└── consult/
-    ├── system.j2
-    ├── auto_fill_outline.j2
-    ├── section_question.j2
-    ├── quality_gate.j2
-    └── summary.j2
+├── system_explore.j2                # Explore agent persona
+├── system_consult.j2                # Consult agent persona
+├── _knowledge_card.j2               # BU 別 KC 共用片段
+├── explore_question.j2              # discovery_loop 提問（含 meta 問題承接規則）
+├── extract_signals.j2
+├── score_candidates.j2              # 5 維度評分 structured output
+├── emit_paragraph.j2                # 段落描述生成
+├── acknowledge_and_guide.j2         # stage 4-5 承接 + 引導去看候選卡
+├── auto_fill_outline.j2
+├── section_question.j2
+├── apply_section_answer.j2
+├── quality_gate.j2
+├── acknowledge_ai_necessity.j2      # [新增] BU 點「我了解了」時的 agent 回應
+├── override_ai_necessity.j2         # [新增] BU 點「還是想試試 AI」時的 agent 回應
+├── explain_solution_class.j2        # [新增] BU 點「想了解差別」時的 7 類 cheat sheet 比較
+└── stage5_keep_talking.j2           # [新增] BU 點「再聊一下」時的換切角承接
 ```
 
-- Prompt 版本化：檔頭加 `{# v1.0 2026-05-12 #}` 註解；變更時 bump
-- Few-shot 與 grounding context（例：BU 別特有術語）由 YAML 模板提供
+- Prompt 版本化：檔頭加 `{# v1.0 2026-05-25 #}` 註解；變更時 bump
+- Few-shot 與 grounding context（例：BU 別特有術語）由 KC YAML 提供
 
 ### 3.6 BRD 模板 (YAML config)
 
@@ -588,18 +660,31 @@ sections:
 | Method | Path | 功能 | Request | Response |
 | --- | --- | --- | --- | --- |
 | GET | `/sessions` | 列使用者 sessions | query: `status?` | `[SessionSummary]` |
-| POST | `/sessions` | 建 session（Phase 0.3）| `{bu, sme_role, raw_hint?}` | `{session_id, mode}` |
-| GET | `/sessions/{id}` | 取 session 完整 state（resume）| — | `SessionFullState` |
+| POST | `/sessions` | 建 session（Phase 0.3）| `{bu, sme_role, raw_hint?, llm_model?}` | `{session_id, mode}` |
+| GET | `/sessions/{id}` | 取 session 完整 state（resume）| — | `SessionFullState`（含 5 個彈窗旗標：`ai_necessity_warned` / `pending_ai_necessity_decision` / `bu_overrode_ai_necessity` / `stage_5_stuck_acked` / `pending_stage5_decision`） |
 | DELETE | `/sessions/{id}` | 刪 session（僅 soft delete）| — | 204 |
 | POST | `/sessions/{id}/messages` | BU 一輪回覆（Explore / Consult Step 2）| `{text}` | 202 accepted；實際 agent reply 走 SSE |
 | POST | `/sessions/{id}/handoff/confirm` | C1 BU 點「進入 Consult mode」| — | `{mode: "consult_step1"}` |
+| POST | `/sessions/{id}/handoff/dismiss` | C1 BU 點「再討論一下」 | — | 202 |
 | POST | `/sessions/{id}/explore/reset` | C3 重新探索 | `{reason?}` | `{mode: "explore"}` |
 | GET | `/sessions/{id}/sections` | 取 BRD 大綱（Consult）| — | `[SectionState]` |
 | PATCH | `/sessions/{id}/sections/{sid}` | E3 inline edit | `{content}` | `SectionState` |
 | POST | `/sessions/{id}/sections/{sid}/action` | E2 Accept/Refine/Skip/Flag | `{action, payload?}` | `SectionState` |
+| POST | `/sessions/{id}/sections/{sid}/select` | BU 主動切某章 → reset 為 needs_round2 + 重訪 | — | 202 |
+| POST | `/sessions/{id}/candidates/select` | BU 在工作區點選候選卡 | `{rank}` | 202 |
 | POST | `/sessions/{id}/submit` | F1「送 BA」| — | `{deliverables: {...}}` |
 | GET | `/sessions/{id}/deliverables` | 取交付物（BA 端 / 匯出）| — | `Deliverables` |
 | GET | `/sessions/{id}/events` | **SSE endpoint**（§3.8） | — | `text/event-stream` |
+| **[新增 2026-05-25] AI 必要性彈窗 endpoints** | | | | |
+| POST | `/sessions/{id}/ai-necessity/acknowledge` | BU 點「我了解了，讓我繼續想想」 | — | 202；agent 透過 SSE stream 帶脈絡承接 |
+| POST | `/sessions/{id}/ai-necessity/override` | BU 點「我有理由，還是想用 AI 試試看」 | — | 202；agent 承接決定不勸退、邀補理由；另設 `bu_overrode_ai_necessity=True` |
+| POST | `/sessions/{id}/ai-necessity/explain` | BU 點「想了解 [solution_class] 跟 AI 的差別」 | — | 202；agent stream 7 類 cheat sheet 比較 |
+| **[新增 2026-05-25] Stage 5 卡關彈窗 endpoints** | | | | |
+| POST | `/sessions/{id}/stage5/dismiss` | BU 點「再聊一下，我想想」 | — | 202；agent stream 換切角承接 |
+| POST | `/sessions/{id}/stage5/quick-handoff` | BU 點「先用 #N 試試 BRD」 | `{rank}` | 202；不 stream agent，直接走 emit_dual_output 進 handoff |
+| **[新增 2026-05-25] Misc** | | | | |
+| GET | `/api/v1/models` | 前端模型選單來源（動態抓 OpenAI/Gemini list-models + 過濾 + 5min cache） | — | `{models[], default, backends_available, source ('live'\|'fallback'), failures[]}` |
+| GET | `/health/llm` | 戳一次 LLM 驗連線 | query: `model?` | `{status, llm_mode, backend, model, sample}` |
 
 #### 3.7.1 錯誤碼
 
@@ -621,6 +706,7 @@ Endpoint：`GET /sessions/{id}/events`（per-session 長連線）。
 | --- | --- | --- | --- |
 | `agent_reply_delta` | `{turn_id, text_delta}` | LLM streaming chunk | 對話區逐字渲染 |
 | `agent_reply_done` | `{turn_id, full_text}` | LLM 完成 | 對話區 finalize，解 disabled |
+| `bu_turn_recorded` | `{turn_id, text}` | backend 寫入 BU TraceEntry 後 | 對話區 append BU 訊息（彈窗選項標籤等） |
 | `candidate_updated` | `{candidates: [...]}` | `score_candidates` 後 | 工作區候選卡片更新 |
 | `pain_signal_added` | `{signal: PainSignal}` | `extract_signals` 後 | 工作區 timeline 加一筆 |
 | `stage_changed` | `{stage: int}` | `converge_check` stage++ | progress bar 內部刻度 |
@@ -628,8 +714,12 @@ Endpoint：`GET /sessions/{id}/events`（per-session 長連線）。
 | `mode_changed` | `{from, to}` | `route_mode` 切換 | progress bar 推進、工作區換版面 |
 | `outline_ready` | `{sections: [...]}` | `auto_fill_outline` 完成 | 渲染大綱樹 |
 | `section_updated` | `{section_id, section: SectionState}` | `handle_action` 或 LLM fill | 工作區對應章節更新 |
+| `current_section_changed` | `{section_id}` | BU 主動切章 / accept 後跳下一章 | 對話區 SectionInlineHeader 同步 |
 | `conflict_detected` | `{conflicts: [...]}` | `quality_gate` fail | 提示衝突點 |
 | `cold_exit` | `{reason}` | B6 觸發 | 顯示「建議離線找 BA」畫面 |
+| `stage5_stuck` **[新增 2026-05-25]** | `{rounds, candidates: top3}` | `converge_check` 在 stage 5 連 3 輪未選 candidate | 彈 Stage5StuckModal；並 set `pending_stage5_decision=True` 暫停 graph |
+| `ai_necessity_warning` **[新增 2026-05-25]** | `{solution_class, rationale, top_candidate, candidates: top3}` | `score_candidates` 在 top1 ai_necessity=low 連續 ≥ 2 次 | 彈 AiNecessityWarningModal；並 set `pending_ai_necessity_decision=True` 暫停 graph |
+| `turn_done` | `{mode, stage, history_len}` | `process_bu_message` 結束（兜底） | 解 `awaitingAgent`，輸入框可再輸入 |
 | `deliverables_ready` | `{summary, trace, brd_url}` | `build_deliverables` 完成 | 切完成畫面（F5）|
 | `agent_error` | `{message, retry: bool}` | LLM / graph 錯誤 | 對話區紅字錯誤卡 |
 | `heartbeat` | `{ts}` | 每 25 秒 | 客戶端重連偵測 |
@@ -638,6 +728,31 @@ Endpoint：`GET /sessions/{id}/events`（per-session 長連線）。
 - 用 `sse-starlette` 套件
 - 每個 session 一條連線；多頁面開啟同 session 時後端 broadcast 到所有 active SSE streams（SessionBus）
 - 斷線重連：client 帶 `Last-Event-ID` header，server 從事件 log 中補送
+- **[新增 2026-05-25] SessionBus ring buffer 256 events / session**：reload 後 SSE 重連會 replay 全部歷史事件，前端 `ai_necessity_warning` / `stage5_stuck` handler 必須做防彈（見 §3.8.1）
+
+#### 3.8.1 Deferred-reply 彈窗 pattern（[新增於 2026-05-25]）
+
+`ai_necessity_warning` 與 `stage5_stuck` 兩個彈窗採用同一個 pattern：**graph publish 完彈窗 SSE event 後立刻停**，不對「觸發彈窗的那則 BU 訊息」做即時 agent 回覆。BU 在 modal 點選項後，後端對應 endpoint 才負責：
+
+1. 寫一則 `role="bu"` 的 TraceEntry（內容是寫死的選項標籤字串），publish `bu_turn_recorded` 進對話區
+2. Render 對應 prompt（含 top1 候選 / pain signals / 最後一則 BU 訊息）
+3. LLM stream agent reply（quick_handoff 例外，直接走 emit_dual_output 不 stream）
+4. 寫 agent TraceEntry + clear `pending_*_decision` flag
+
+實作骨架：
+- State：`pending_ai_necessity_decision` / `pending_stage5_decision`
+- Subgraph：`after_converge` 看 flag 直接 `END`
+- Service helpers：`_record_bu_option_choice` / `_stream_agent_reply` / `_run_ai_necessity_decision`（三段式共用主流程）
+
+#### 3.8.2 SSE replay 防彈（[新增於 2026-05-25]）
+
+reload 後 SessionBus 會 replay 過去 256 events，包括 `ai_necessity_warning` / `stage5_stuck`。前端**雙重保險**：
+
+1. SSE handler 用 `qc.getQueryData<SessionFullState>` 同步讀 react-query cache，看到 `warned && !pending`（已決策）就略過
+2. Cleanup `useEffect`：useQuery settle 後若旗標已 `acked && !pending`，強制關掉殘留 modal
+3. 三個 ai handler + 兩個 stuck handler 點完 `qc.invalidateQueries` 縮短 stale 窗口
+
+差異化：`pending=true` 表「上次離開時 BU 還沒選」，reload 後仍要彈讓他完成決策；`pending=false` 表「已選過」，replay 時略過。
 
 ### 3.9 PostgresSaver 與 Checkpoint
 
@@ -829,6 +944,7 @@ CREATE TABLE sessions (
     bu TEXT NOT NULL,
     sme_role TEXT NOT NULL,
     raw_hint TEXT,
+    llm_model TEXT,                       -- [新增於 2026-05-25] 該 session 全程綁定的 LLM 模型 id；migration 0002
     mode TEXT NOT NULL,                   -- explore / consult_step1 / consult_step2 / done / cold
     stage INT,
     status TEXT NOT NULL DEFAULT 'active', -- active / done / cold / abandoned
@@ -933,6 +1049,32 @@ IdP 底層可選：
 - CORS 白名單只允許正式 frontend domain
 - CSRF：refresh cookie 帶 `SameSite=Strict`；state-changing REST 走 bearer + double-submit token
 - Session revocation：JWT 黑名單存 Redis，logout 即刻失效
+
+### 6.1 環境變數（[新增於 2026-05-25]）
+
+對應 `backend/app/core/config.py` 的 `Settings`：
+
+| 變數 | 用途 | 預設 / 範例 |
+| --- | --- | --- |
+| `DATABASE_URL` | Postgres connection string | `postgresql+psycopg://bu_agent:bu_agent@localhost:5432/bu_agent` |
+| `LANGGRAPH_CHECKPOINT_URL` | LangGraph PostgresSaver 同 DB | 同上（不帶 `+psycopg`） |
+| **LLM 多後端**（[新增 2026-05-25]） | | |
+| `LLM_MODE` | `auto` / `gemini` / `openai` / `mock` | `auto` |
+| `GEMINI_API_KEY` | Gemini key（缺 → fallback mock） | — |
+| `GEMINI_MODEL` | Gemini 預設 model id | `gemini-2.5-pro` |
+| `OPENAI_API_KEY` | OpenAI key（缺 → fallback mock） | — |
+| `OPENAI_MODEL` | OpenAI 預設 model id | `gpt-4o-mini` |
+| `ALLOWED_MODELS` | 前端模型選單白名單（fallback 用 CSV，動態抓失敗時生效） | `gpt-4o-mini,gpt-4o,gpt-4.1-mini,gemini-2.5-pro` |
+| `DEFAULT_MODEL` | 新建 session 時若 BU 沒選的 fallback 模型 | `gpt-4o-mini` |
+| **Auth** | | |
+| `AUTH_MODE` | `mock` (PoC) / `sso` | `mock` |
+| `OIDC_ISSUER` / `OIDC_CLIENT_ID` / `OIDC_CLIENT_SECRET` / `OIDC_REDIRECT_URI` | SSO mode 必填 | — |
+| **App** | | |
+| `APP_ENV` | `local` / `dev` / `staging` / `prod` | `local` |
+| `LOG_LEVEL` | `INFO` / `DEBUG` | `INFO` |
+| `CORS_ORIGINS` | 前端 domain 白名單（CSV） | `http://localhost:3000` |
+
+`docker-compose.yml` 改用 `env_file: - .env`（取代過去的 `${VAR:-default}` 注入）以避開 Windows host shell env 蓋過 .env 的雷（例：開發者系統有舊 `OPENAI_API_KEY` 蓋過 .env 內新 key）。
 
 ---
 

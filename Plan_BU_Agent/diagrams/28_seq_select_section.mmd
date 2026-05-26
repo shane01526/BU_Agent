@@ -1,0 +1,62 @@
+%% ID: S09 | Title: 點 strip 切章 + RevisitSection 防呆 | Last updated 2026-05-25
+%% User action：BU 在 ConsultFullscreenLayout 點 strip 切到別章
+%% 若該章 status ∈ {accepted, skipped, flagged_for_ba} → 先彈 RevisitSectionConfirmModal 防呆
+%% 確認後 reset 該章為 needs_round2 + 推 graph 重訪
+sequenceDiagram
+    autonumber
+    actor BU
+    participant FE as Frontend<br/>(ConsultFullscreenLayout +<br/>RevisitSectionConfirmModal)
+    participant API as FastAPI
+    participant SVC as session_service.py
+    participant G as Graph
+    participant LLM
+    participant Bus as SSE Bus
+
+    BU->>FE: 點某章的 strip
+    FE->>FE: handleSelect 偵測 status
+
+    alt status ∈ {accepted, skipped, flagged_for_ba}
+        FE->>FE: setRevisitTarget{sectionId, status}<br/>開 RevisitSectionConfirmModal<br/>(不先切 localSelectedId)
+        BU->>FE: 點「取消」
+        FE->>FE: setRevisitTargetnull<br/>不動 localSelectedId
+        Note over FE: 結束（保持原章顯示）
+    end
+
+    alt status='placeholder'（前端守門）
+        FE->>FE: 不發 select_section 請求<br/>(backend 也會 raise ValueError)
+    else 其他狀態（含已 confirm RevisitSection）
+        FE->>FE: setLocalSelectedIdsectionId<br/>setAwaitingAgenttrue
+        FE->>API: POST /sessions/{id}/sections/{sid}/select
+        API->>SVC: select_section（session_service.py:419）
+        SVC->>G: aget_state → outline
+
+        alt 該章 status='placeholder'
+            SVC-->>API: ValueError
+            API-->>FE: 400
+        else 找不到 sid
+            SVC-->>API: KeyError
+            API-->>FE: 404
+        else
+            alt 該章 status != needs_round2
+                SVC->>SVC: 把該章 reset 為 needs_round2
+                SVC->>Bus: publish section_updated
+                Bus-->>FE: SSE section_updated（章狀態變回 needs_round2）
+            end
+            SVC->>G: aupdate_state<br/>{current_section_idx: idx,<br/> brd_outline: new_outline}
+            SVC->>Bus: publish current_section_changed<br/>{section_id}
+            Bus-->>FE: SSE current_section_changed<br/>SectionInlineHeader 立刻同步顯示
+
+            SVC->>G: ainvoke{} 推進 graph<br/>→ section_loop 對該章重新提問
+            G->>LLM: section_question.j2 chat_stream
+            loop streaming
+                LLM-->>G: chunk → publish agent_reply_delta {section_id}
+                Bus-->>FE: SSE agent_reply_delta<br/>setAwaitingAgentfalse
+            end
+            G->>Bus: publish agent_reply_done {section_id}
+            Bus-->>FE: SSE agent_reply_done
+
+            SVC-->>API: {section_id, current_section_idx}
+            API-->>FE: 202 AcceptedResponse
+            FE->>FE: qc.invalidateQueries
+        end
+    end

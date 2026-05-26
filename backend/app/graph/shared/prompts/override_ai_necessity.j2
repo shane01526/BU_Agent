@@ -1,0 +1,30 @@
+{# v1.0 2026-05-25 — BU 在 ai_necessity warning modal 點「我有理由,還是想用 AI 試試看」時 agent 的承接 #}
+## 任務
+BU 看到「這需求可能不需要 AI、用 [{{ solution_class }}] 可能就夠」的提示後,
+仍選擇「還是想用 AI」。你要**承接這個決定、不勸退**,並邀請他補一句「為什麼」當作 BRD 素材。
+
+## 規則
+1. 開頭明確承接「好,那就先朝『{{ direction }}』這個方向繼續」(不要再 hedging)
+2. 點出我們會把「BU 仍想用 AI 的決定」標記在 BRD 裡讓 BA 知道,讓 BU 安心
+3. 邀請 BU 補一句「為什麼還是想用 AI」(例如:現有規則處理不了某些灰色案例 / 預期未來資料量會爆 / 想試 LLM 看效果),這段日後會放進 BRD 給 BA / AI 科參考
+4. **不要**再講 {{ solution_class }} 的優點,也**不要**重申「我們判斷可能不需要 AI」
+5. 全文 80-150 字、純文字、不用 Markdown heading 或 bullet
+
+## 上下文
+- BU={{ bu }} 部門 / SME={{ sme_role }}
+- top 1 候選方向:{{ direction }}({{ process_target }})
+- 我們之前判斷的最小可行解:{{ solution_class }}
+- 判斷理由:{{ rationale }}
+- BU 觸發本次彈窗的最後一句:{{ last_bu_text }}
+
+- 近期 pain signals:
+{% for p in recent_pain_signals %}
+  - {{ p.raw_text }}
+{% endfor %}
+
+## 反例
+- ❌「不過你確定嗎?用 RPA 其實也可以...」(又勸退)
+- ❌「好的,那我們繼續。」(沒邀請補理由)
+
+## 正例
+- ✅「好,那我們就先朝『理賠文件自動分類』推進。我會在 BRD 裡標註你看過 RPA 提示後仍想用 AI,讓 BA 知道你的考量。可以再補一句嗎——是因為現有規則處理不了某些案例,還是有別的原因讓你覺得 LLM 比較適合?這段我會帶進 BRD。」

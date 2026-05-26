@@ -31,12 +31,21 @@ export interface SessionSummary {
   updated_at: string;
 }
 
+export interface ModelsResponse {
+  models: string[];
+  default: string;
+  backends_available: { openai: boolean; gemini: boolean };
+  source?: 'live' | 'fallback';
+  failures?: string[];
+}
+
 export interface SessionFullState {
   session_id: string;
   user_id: string;
   bu: string;
   sme_role: string;
   raw_hint: string | null;
+  llm_model: string | null;
   mode: string;
   stage: number | null;
   status: string;
@@ -62,6 +71,11 @@ export interface SessionFullState {
   }>;
   sections: SectionState[];
   paragraph_description: string | null;
+  ai_necessity_warned: boolean;
+  pending_ai_necessity_decision: boolean;
+  bu_overrode_ai_necessity: boolean;
+  stage_5_stuck_acked: boolean;
+  pending_stage5_decision: boolean;
 }
 
 export type SectionStatus =
@@ -90,8 +104,13 @@ export interface Deliverables {
 
 export const api = {
   listSessions: () => request<SessionSummary[]>('/sessions'),
-  createSession: (body: { bu: string; sme_role: string; raw_hint?: string }) =>
-    request<SessionSummary>('/sessions', { method: 'POST', body: JSON.stringify(body) }),
+  listModels: () => request<ModelsResponse>('/models'),
+  createSession: (body: {
+    bu: string;
+    sme_role: string;
+    raw_hint?: string;
+    llm_model?: string;
+  }) => request<SessionSummary>('/sessions', { method: 'POST', body: JSON.stringify(body) }),
   getSession: (id: string) => request<SessionFullState>(`/sessions/${id}`),
   postMessage: (id: string, text: string) =>
     request<{ accepted: boolean }>(`/sessions/${id}/messages`, {
@@ -133,6 +152,10 @@ export const api = {
     request<SectionState>(`/sessions/${id}/sections/${sid}/action`, {
       method: 'POST',
       body: JSON.stringify({ action }),
+    }),
+  selectSection: (id: string, sid: string) =>
+    request<{ accepted: boolean }>(`/sessions/${id}/sections/${sid}/select`, {
+      method: 'POST',
     }),
   submitSession: (id: string) =>
     request<Deliverables>(`/sessions/${id}/submit`, { method: 'POST' }),

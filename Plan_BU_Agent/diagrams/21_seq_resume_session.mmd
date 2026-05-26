@@ -1,0 +1,50 @@
+%% ID: S02 | Title: Resume Session + SSE Replay 防呆 | Last updated 2026-05-25
+%% User action：F5 重整、或從 sessions list 點進舊 session
+%% 重點：SSE ring buffer 會 replay 舊 ai_necessity_warning / stage5_stuck，
+%%       前端用 react-query cache + cleanup useEffect 雙重保險防止 modal 重彈
+sequenceDiagram
+    autonumber
+    actor BU
+    participant FE as Frontend<br/>(page.tsx + sse.ts)
+    participant API as FastAPI<br/>(sessions.py + sse.py)
+    participant G as Graph<br/>(PostgresSaver)
+    participant Bus as SSE Bus<br/>(events.py)
+
+    BU->>FE: F5 重整 /sessions/[id]<br/>或從 list 點進
+
+    par 並行
+        FE->>API: GET /api/v1/sessions/{id}
+        API->>G: aget_statethread_id
+        G-->>API: GraphState（含 ai_necessity_warned /<br/>pending_ai_necessity_decision /<br/>stage_5_stuck_acked /<br/>pending_stage5_decision 等）
+        API-->>FE: SessionFullState（5 個彈窗旗標 expose 出來）
+        FE->>FE: useQuery cache 寫入<br/>['session', sessionId]
+    and
+        FE->>API: GET /api/v1/sessions/{id}/events<br/>(EventSource，無 Last-Event-ID)
+        API->>Bus: subscribesessionId, last_event_id=0
+        Bus->>Bus: 從 ring buffer<br/>取 history 全部 events
+        loop replay 過去事件
+            Bus-->>FE: SSE event（含舊的<br/>ai_necessity_warning / stage5_stuck<br/>/ candidate_updated 等）
+        end
+    end
+
+    Note over FE: SSE handler 收到 ai_necessity_warning<br/>(page.tsx 約 line 180)
+    FE->>FE: cur = qc.getQueryData<SessionFullState><br/>(['session', sessionId])
+    alt warned && !pending<br/>(BU 已決策過)
+        FE->>FE: break（略過 modal）
+    else warned && pending<br/>(沒選就重整)
+        FE->>FE: setAiNecessityWarn...<br/>仍要彈讓 BU 完成決策
+    else !warned (第一次)
+        FE->>FE: setAiNecessityWarn...<br/>正常彈
+    end
+
+    Note over FE: SSE handler 收到 stage5_stuck<br/>(同形 cache-read guard)
+    FE->>FE: 檢查 stage_5_stuck_acked && !pending_stage5_decision<br/>→ 已 ack 就 break；否則 setStage5Stuck...
+
+    Note over FE: 兜底：cleanup useEffect<br/>(page.tsx 約 line 70-90)
+    FE->>FE: 監聽 data.stage_5_stuck_acked +<br/>pending_stage5_decision 變化
+    alt useQuery 後 settle 出 acked && !pending<br/>但 modal state 還在
+        FE->>FE: setStage5Stucknull<br/>強制關（兜底）
+    end
+    FE->>FE: 同樣的兜底邏輯給 ai_necessity
+
+    Note over FE: 對話區渲染：<br/>liveMessages 空時用 historyToMessagesdata 還原<br/>之後 SSE replay 來 bu_turn_recorded /<br/>agent_reply_done append 進 liveMessages<br/>(dedupe 用 turn_id)

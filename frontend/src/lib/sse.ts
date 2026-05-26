@@ -26,11 +26,13 @@ const KNOWN_EVENTS = [
   'mode_changed',
   'outline_ready',
   'section_updated',
+  'current_section_changed',
   'conflict_detected',
   'cold_exit',
   'stage5_stuck',
   'ai_necessity_warning',
   'deliverables_ready',
+  'turn_done',
   'heartbeat',
 ];
 

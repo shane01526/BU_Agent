@@ -1,0 +1,37 @@
+%% ID: L1.6 | Title: Session Mode 狀態機 | Last updated 2026-05-25
+%% mode 不在 main_graph 內切，都由 service 層用 aupdate_state 推
+%% 對應檔：backend/app/services/session_service.py
+stateDiagram-v2
+    [*] --> explore: create_session<br/>session_service.py:24<br/>(mode='explore', stage=1)
+
+    explore --> cold: converge_check 偵測<br/>2 連續 BU 否定<br/>(nodes.py:431<br/>publish cold_exit)
+    explore --> consult_step1: confirm_handoff<br/>session_service.py:157<br/>(BU 在 HandoffConfirmModal<br/>點「進入 Consult mode」<br/>publish mode_changed)
+
+    consult_step1 --> consult_step2: auto_fill_outline 末端<br/>set mode='consult_step2'<br/>+ current_section_idx<br/>(consult/nodes.py:167)<br/>同 super-step 直接進 section_loop
+
+    consult_step2 --> consult_step2: BU 訊息 / inline edit /<br/>section_action / select_section<br/>(graph 持續處理 needs_round2)
+    consult_step2 --> submit: submit_session<br/>session_service.py:477<br/>aupdate_state mode='submit'<br/>(BU 點「送 BA」)
+
+    submit --> done: build_deliverables 完成<br/>consult/nodes.py:552<br/>寫 deliverables 表<br/>+ session.status='done'
+
+    consult_step1 --> explore: reset_explore<br/>session_service.py:853<br/>(BU 點「重新探索」)<br/>清 candidate / outline / history /<br/>pain_signals / pending_*_decision<br/>publish mode_changed
+    consult_step2 --> explore: reset_explore<br/>同上（C3 escape hatch）
+
+    cold --> [*]: BU 回 sessions list
+
+    done --> [*]: 跳 /sessions/[id]/done
+
+    note right of explore
+        Explore 內部 stage 1→5；
+        遇 ai_necessity_warning / stage5_stuck
+        graph 暫停（pending flag），
+        BU 點 modal 後繼續本 mode
+        （詳 L1.3）
+    end note
+
+    note right of consult_step2
+        BU 可任意章節 inline edit /
+        Accept / Refine / Skip / Flag /
+        切到別章重訪（select_section）；
+        全部章節 != needs_round2 才進 quality_gate
+    end note

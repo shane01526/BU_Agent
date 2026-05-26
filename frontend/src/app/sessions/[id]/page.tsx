@@ -6,12 +6,12 @@ import { useParams, useRouter } from 'next/navigation';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import { ChatPanel, historyToMessages, type ChatMessage } from '@/components/chat/ChatPanel';
+import { ConsultFullscreenLayout } from '@/components/consult/ConsultFullscreenLayout';
 import { ProgressBar } from '@/components/layout/ProgressBar';
 import { HandoffConfirmModal } from '@/components/modal/HandoffConfirmModal';
 import { Stage5StuckModal } from '@/components/modal/Stage5StuckModal';
 import { AiNecessityWarningModal } from '@/components/modal/AiNecessityWarningModal';
 import { CandidateCards, type Candidate } from '@/components/workspace/CandidateCards';
-import { OutlineTree } from '@/components/workspace/OutlineTree';
 import { PainTimeline, type PainSignalItem } from '@/components/workspace/PainTimeline';
 import { api, type SectionAction, type SectionState, type SessionFullState } from '@/lib/api';
 import { useSessionEvents, type SseEvent } from '@/lib/sse';
@@ -58,6 +58,35 @@ export default function SessionPage() {
   }, [data?.mode]);
   // 記下最後處理過的 handoff event id;replay 來相同或更舊就略過
   const lastHandoffEventIdRef = useRef<number>(0);
+
+  // SSE replay 防呆:reload 後 backend ring buffer 會 replay 過去的 ai_necessity_warning
+  // 與 stage5_stuck。SSE handler 從 react-query cache 同步讀 graph state 旗標決定是否略過,
+  // 比 useEffect 同步 ref 更接近真實狀態(useEffect 有 microtask 延遲)。
+  // 額外搭 cleanup effect 兜底:若 SSE replay 比 useQuery 還快、modal 已開,
+  // useQuery settle 後若旗標已 acked 就強制關 modal(最壞情況閃一下,不殘留)。
+  useEffect(() => {
+    if (
+      data?.stage_5_stuck_acked &&
+      !data?.pending_stage5_decision &&
+      stage5Stuck
+    ) {
+      setStage5Stuck(null);
+    }
+    if (
+      data?.ai_necessity_warned &&
+      !data?.pending_ai_necessity_decision &&
+      aiNecessityWarn
+    ) {
+      setAiNecessityWarn(null);
+    }
+  }, [
+    data?.stage_5_stuck_acked,
+    data?.pending_stage5_decision,
+    data?.ai_necessity_warned,
+    data?.pending_ai_necessity_decision,
+    stage5Stuck,
+    aiNecessityWarn,
+  ]);
 
   // 對話訊息來源切換：
   // - 首次 mount（liveMessages 空）→ 用 REST history 還原（resume 用）
@@ -156,6 +185,11 @@ export default function SessionPage() {
           // SSE replay 防護:同一 event id 不重彈
           if (modeRef.current !== 'explore') break;
           if (ev.id <= lastStuckEventIdRef.current) break;
+          // 從 react-query cache 同步讀 graph state:
+          //  - acked && !pending → BU 已選過,replay 來的 stuck 略過
+          //  - acked && pending  → 上次離開時 BU 還沒選,reload 後仍要彈讓他完成決策
+          const cur = qc.getQueryData<SessionFullState>(['session', sessionId]);
+          if (cur?.stage_5_stuck_acked && !cur?.pending_stage5_decision) break;
           lastStuckEventIdRef.current = ev.id;
           setStage5Stuck({
             rounds: Number(d.rounds ?? 0),
@@ -166,6 +200,13 @@ export default function SessionPage() {
         case 'ai_necessity_warning': {
           if (modeRef.current !== 'explore') break;
           if (ev.id <= lastAiNecessityEventIdRef.current) break;
+          // SSE 連線重新建立時 backend ring buffer 會 replay 整段歷史。
+          // 從 react-query cache 同步讀 graph state:
+          //  - warned && !pending → BU 已選過,replay 來的 warning 略過
+          //  - warned && pending  → 上次離開時 BU 還沒選,reload 後仍要彈讓他完成決策
+          //  - !warned            → 第一次發,該彈
+          const cur = qc.getQueryData<SessionFullState>(['session', sessionId]);
+          if (cur?.ai_necessity_warned && !cur?.pending_ai_necessity_decision) break;
           lastAiNecessityEventIdRef.current = ev.id;
           setAiNecessityWarn({
             solutionClass: String(d.solution_class ?? 'rpa'),
@@ -209,9 +250,22 @@ export default function SessionPage() {
           });
           break;
         }
+        case 'current_section_changed': {
+          // backend 已決定切到下一章;立刻 set pendingSectionId,
+          // 讓 Strip / SectionInlineHeader 立刻跳到新章,不必等 agent_reply_done
+          const sid = String(d.section_id ?? '');
+          if (sid) setPendingSectionId(sid);
+          break;
+        }
         case 'deliverables_ready': {
           // 跳到完成畫面
           router.push(`/sessions/${sessionId}/done`);
+          break;
+        }
+        case 'turn_done': {
+          // 兜底:有些 graph 路徑(stage>=4 silent END、cold_exit、ai_necessity 警示)
+          // 不會發 agent_reply_delta,只能靠這個事件解鎖輸入框。
+          setAwaitingAgent(false);
           break;
         }
         case 'conflict_detected': {
@@ -288,6 +342,19 @@ export default function SessionPage() {
     qc.invalidateQueries({ queryKey: ['session', sessionId] });
   }
 
+  async function handleSelectSection(sectionId: string) {
+    // BU 主動切到某章 → backend reset 為 needs_round2 + 推 graph 重訪
+    setAwaitingAgent(true);
+    try {
+      await api.selectSection(sessionId, sectionId);
+    } catch (e) {
+      setAwaitingAgent(false);
+      throw e;
+    }
+    qc.invalidateQueries({ queryKey: ['session', sessionId] });
+    // awaitingAgent 由 agent_reply_delta 收到時自動關閉
+  }
+
   async function handleSubmitSession() {
     if (!confirm('確定送 BA review？送出後就無法再修改 BRD。')) return;
     await api.submitSession(sessionId);
@@ -295,18 +362,26 @@ export default function SessionPage() {
   }
 
   async function handleAiExplain() {
+    // BU 標籤走 SSE bu_turn_recorded、agent reply 走 agent_reply_delta/done
+    // 由後端 _spawn 背景跑;awaitingAgent 由第一個 agent_reply_delta 自動關
+    setAwaitingAgent(true);
     setAiNecessityWarn(null);
     await api.explainAiNecessity(sessionId);
+    qc.invalidateQueries({ queryKey: ['session', sessionId] });
   }
 
   async function handleAiOverride() {
+    setAwaitingAgent(true);
     setAiNecessityWarn(null);
     await api.overrideAiNecessity(sessionId);
+    qc.invalidateQueries({ queryKey: ['session', sessionId] });
   }
 
   async function handleAiAcknowledge() {
+    setAwaitingAgent(true);
     setAiNecessityWarn(null);
     await api.acknowledgeAiNecessity(sessionId);
+    qc.invalidateQueries({ queryKey: ['session', sessionId] });
   }
 
   async function handleAiResetExplore() {
@@ -315,16 +390,22 @@ export default function SessionPage() {
   }
 
   async function handleStuckKeepTalking() {
+    // BU 標籤走 SSE bu_turn_recorded、agent reply 走 agent_reply_delta/done
+    // 由後端 _spawn 背景跑;awaitingAgent 由第一個 agent_reply_delta 自動關
+    setAwaitingAgent(true);
     setStage5Stuck(null);
     await api.dismissStage5Stuck(sessionId);
+    qc.invalidateQueries({ queryKey: ['session', sessionId] });
   }
 
   async function handleStuckQuickHandoff(rank: number) {
+    // 不 stream agent reply,直接走 handoff 流程
     setStage5Stuck(null);
     setSelectedRank(rank);
     setGeneratingHandoff(true);
     try {
       await api.quickHandoff(sessionId, rank);
+      qc.invalidateQueries({ queryKey: ['session', sessionId] });
     } catch (e) {
       setGeneratingHandoff(false);
       throw e;
@@ -361,6 +442,10 @@ export default function SessionPage() {
   }
 
   const mode = data.mode;
+  const canSubmit =
+    sections.length > 0 &&
+    !sections.some((s) => s.status === 'needs_round2');
+  const isConsultMode = mode === 'consult_step1' || mode === 'consult_step2';
 
   return (
     <main className="flex h-screen flex-col">
@@ -375,7 +460,7 @@ export default function SessionPage() {
           </span>
         </div>
         <div className="flex items-center gap-2">
-          {(mode === 'consult_step1' || mode === 'consult_step2') && (
+          {isConsultMode && (
             <button
               onClick={handleResetExplore}
               className="text-xs rounded border px-2 py-1 hover:bg-neutral-50 text-neutral-600"
@@ -384,26 +469,44 @@ export default function SessionPage() {
               ← 重新探索
             </button>
           )}
+          {isConsultMode && (
+            <button
+              onClick={handleSubmitSession}
+              disabled={!canSubmit}
+              title={canSubmit ? '送 BA review' : '還有 needs_round2 章節未處理'}
+              className={
+                canSubmit
+                  ? 'text-xs rounded bg-accent px-3 py-1 font-medium text-white hover:bg-accent-muted'
+                  : 'text-xs rounded bg-neutral-200 px-3 py-1 font-medium text-neutral-400 cursor-not-allowed'
+              }
+            >
+              送 BA →
+            </button>
+          )}
         </div>
       </header>
 
-      <div className="flex flex-1 overflow-hidden">
-        <section className="flex w-1/2 flex-col border-r">
-          <ChatPanel
-            messages={chatMessages}
-            disabled={awaitingAgent || data.status !== 'active'}
-            thinking={
-              !streaming && (
+      {mode === 'explore' || mode === 'cold' ? (
+        <div className="flex flex-1 overflow-hidden">
+          <section className="flex w-1/2 flex-col border-r">
+            <ChatPanel
+              messages={chatMessages}
+              disabled={
                 awaitingAgent ||
-                // 剛進新 session 還沒收到 agent 開場時也顯示
-                (chatMessages.length === 0 && mode === 'explore')
-              )
-            }
-            onSend={handleSend}
-          />
-        </section>
-        <section className="w-1/2 overflow-y-auto bg-neutral-50 p-6">
-          {mode === 'explore' || mode === 'cold' ? (
+                !!aiNecessityWarn ||
+                !!stage5Stuck ||
+                data.status !== 'active'
+              }
+              thinking={
+                !streaming &&
+                (awaitingAgent ||
+                  // 剛進新 session 還沒收到 agent 開場時也顯示
+                  (chatMessages.length === 0 && mode === 'explore'))
+              }
+              onSend={handleSend}
+            />
+          </section>
+          <section className="w-1/2 overflow-y-auto bg-neutral-50 p-6">
             <ExploreWorkspace
               candidates={candidates}
               selectedRank={selectedRank}
@@ -413,23 +516,22 @@ export default function SessionPage() {
               coldReason={data.mode === 'cold' ? '建議離線找 BA 對焦' : null}
               generatingHandoff={generatingHandoff}
             />
-          ) : sections.length === 0 || generatingOutline ? (
-            <OutlineLoading />
-          ) : (
-            <OutlineTree
-              sections={sections}
-              pendingSectionId={pendingSectionId}
-              onEdit={handleEditSection}
-              onAction={handleSectionAction}
-              onSubmit={handleSubmitSession}
-              canSubmit={
-                sections.length > 0 &&
-                !sections.some((s) => s.status === 'needs_round2')
-              }
-            />
-          )}
-        </section>
-      </div>
+          </section>
+        </div>
+      ) : (
+        <ConsultFullscreenLayout
+          sections={sections}
+          pendingSectionId={pendingSectionId}
+          generatingOutline={sections.length === 0 || generatingOutline}
+          messages={chatMessages}
+          chatDisabled={awaitingAgent || data.status !== 'active'}
+          thinking={!streaming && awaitingAgent}
+          onSend={handleSend}
+          onEditSection={handleEditSection}
+          onSectionAction={handleSectionAction}
+          onSelectSection={handleSelectSection}
+        />
+      )}
 
       <HandoffConfirmModal
         open={!!handoff}
@@ -515,20 +617,6 @@ function ExploreWorkspace({
         <h2 className="mb-2 text-sm font-semibold text-neutral-700">Pain signals</h2>
         <PainTimeline signals={painSignals} />
       </section>
-    </div>
-  );
-}
-
-function OutlineLoading() {
-  return (
-    <div className="flex flex-col items-center justify-center py-20 text-center">
-      <div className="mb-4 h-3 w-3 animate-pulse rounded-full bg-accent" />
-      <div className="text-sm font-medium text-neutral-700">
-        正在依你選的方向建立 BRD 大綱…
-      </div>
-      <div className="mt-2 max-w-xs text-xs text-neutral-500">
-        Gemini 會依你剛才聊過的脈絡填好需求背景與分析等章節,通常需要 15–30 秒。
-      </div>
     </div>
   );
 }

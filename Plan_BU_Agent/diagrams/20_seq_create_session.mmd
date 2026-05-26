@@ -1,0 +1,67 @@
+%% ID: S01 | Title: 建立 Session（含模型選擇）| Last updated 2026-05-25
+%% User action：BU 在 /sessions/new 填表 + 選 LLM 模型 + 送出
+%% 涵蓋：listModels 動態抓 → createSession → 第一輪 graph kickoff
+sequenceDiagram
+    autonumber
+    actor BU
+    participant FE as Frontend<br/>(sessions/new/page.tsx)
+    participant API as FastAPI<br/>(api/v1/sessions.py + main.py)
+    participant Cat as models_catalog
+    participant OpenAI as OpenAI API
+    participant Gemini as Gemini API
+    participant SVC as session_service.py
+    participant DB as Postgres
+    participant G as Graph<br/>(LangGraph)
+    participant LLM
+    participant Bus as SSE Bus
+
+    Note over BU,FE: 進入 /sessions/new
+    BU->>FE: 開啟 New Session 頁
+    FE->>API: GET /api/v1/models
+    API->>Cat: list_chat_models()
+    par 並行抓
+        Cat->>OpenAI: GET /v1/models<br/>Authorization: Bearer key
+        OpenAI-->>Cat: 126 models
+        Cat->>Cat: _is_openai_chat_model 過濾<br/>留 gpt-*/o1/o3/o4/chatgpt-/chat-latest
+    and
+        Cat->>Gemini: GET /v1beta/models?key=...
+        Gemini-->>Cat: 50 models
+        Cat->>Cat: _is_gemini_chat_model 過濾<br/>留 gemini-* 且支援 generateContent
+    end
+    Cat->>Cat: cache 5 分鐘<br/>（_cachedkind, fetcher）
+    Cat-->>API: {models, default, backends_available, source='live'}
+    API-->>FE: JSON
+    FE->>FE: 渲染下拉<br/>OpenAI 分組 / Gemini 分組<br/>缺 key 自動 disabled<br/>預設 = DEFAULT_MODEL
+
+    Note over BU,FE: 填表
+    BU->>FE: 填 BU別 / 角色簡述 / hint / 選模型
+    BU->>FE: 點「開始」
+    FE->>API: POST /api/v1/sessions<br/>{bu, sme_role, raw_hint, llm_model}
+
+    API->>SVC: create_sessionpayload<br/>session_service.py:24
+    SVC->>SVC: 驗 chosen_model + fallback<br/>到 settings.default_model
+    SVC->>DB: INSERT INTO sessions<br/>(session_id, llm_model, mode='explore',<br/> stage=1, status='active')
+    DB-->>SVC: row
+    SVC-->>API: SessionRow
+    API->>API: _spawn(_run_turn_bg(sid, None))<br/>背景跑首輪 graph
+    API-->>FE: 201 SessionSummary
+    FE->>FE: router.push/sessions/[id]
+
+    Note over API,Bus: 背景：首輪 graph kickoff
+    API->>SVC: run_turndb, session, bu_text=None<br/>session_service.py:50
+    SVC->>G: 首次 ainvoke{initial GraphState}
+    G->>G: entry_router 看 history 空<br/>→ discovery_loop（nodes.py:124）
+    G->>LLM: get_llmstate.llm_model.chat_stream<br/>+ explore_question.j2
+    LLM-->>G: chunk × N
+    loop streaming
+        G->>Bus: publish agent_reply_delta
+        Bus-->>FE: SSE agent_reply_delta
+        FE->>FE: 對話區累加 streaming
+    end
+    G->>Bus: publish agent_reply_done
+    Bus-->>FE: SSE agent_reply_done
+    G-->>SVC: state with first question
+    SVC->>Bus: publish turn_done
+    Bus-->>FE: SSE turn_done<br/>setAwaitingAgentfalse
+
+    Note over FE: 進到 /sessions/[id]<br/>SSE 連線已建好<br/>第一題已顯示

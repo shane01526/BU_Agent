@@ -21,13 +21,13 @@ services:
       context: ./backend
       dockerfile: Dockerfile
     container_name: bu_agent_backend
+    # env_file 讓 .env 內容直接灌進容器,避開 host shell env 蓋掉 ${VAR:-}
+    # 的問題（例:OPENAI_API_KEY 在 Windows 系統環境變數已有舊值會覆寫 .env）
+    env_file:
+      - .env
     environment:
       DATABASE_URL: postgresql+psycopg://bu_agent:bu_agent@postgres:5432/bu_agent
       LANGGRAPH_CHECKPOINT_URL: postgresql://bu_agent:bu_agent@postgres:5432/bu_agent
-      LLM_MODE: ${LLM_MODE:-mock}
-      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
-      GEMINI_MODEL: ${GEMINI_MODEL:-gemini-2.5-pro}
-      AUTH_MODE: ${AUTH_MODE:-mock}
       APP_ENV: local
       CORS_ORIGINS: http://localhost:3000
     ports:

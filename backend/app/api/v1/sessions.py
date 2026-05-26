@@ -138,6 +138,7 @@ async def get_session(
         bu=session.bu,
         sme_role=session.sme_role,
         raw_hint=session.raw_hint,
+        llm_model=session.llm_model,
         mode=session.mode,
         stage=session.stage,
         status=session.status,
@@ -146,6 +147,15 @@ async def get_session(
         pain_signals=[p.model_dump() for p in state.pain_signals] if state else [],
         sections=sections,
         paragraph_description=state.paragraph_description if state else None,
+        ai_necessity_warned=state.ai_necessity_warned if state else False,
+        pending_ai_necessity_decision=(
+            state.pending_ai_necessity_decision if state else False
+        ),
+        bu_overrode_ai_necessity=state.bu_overrode_ai_necessity if state else False,
+        stage_5_stuck_acked=state.stage_5_stuck_acked if state else False,
+        pending_stage5_decision=(
+            state.pending_stage5_decision if state else False
+        ),
     )
 
 
@@ -228,11 +238,12 @@ async def acknowledge_ai_necessity_warning(
     user: Annotated[User, Depends(current_user)],
     db: Annotated[Session, Depends(get_db)],
 ) -> AcceptedResponse:
-    """BU 點「我了解了/讓我繼續想想」。"""
+    """BU 點「我了解了/讓我繼續想想」:agent 用 LLM stream 一段帶脈絡的承接。"""
     session = db.get(SessionRow, session_id)
     if session is None or session.user_id != user.user_id:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "session not found")
-    await session_service.acknowledge_ai_necessity_warning(db, session)
+    sid = session_id
+    _spawn(lambda: _ai_necessity_decision_bg(sid, "acknowledge"), f"ai_ack:{sid}")
     return AcceptedResponse()
 
 
@@ -242,11 +253,12 @@ async def override_ai_necessity_warning(
     user: Annotated[User, Depends(current_user)],
     db: Annotated[Session, Depends(get_db)],
 ) -> AcceptedResponse:
-    """BU 點「還是想試試 AI」:標 bu_overrode,寫進 BRD。"""
+    """BU 點「還是想試試 AI」:agent 用 LLM stream 一段承接 + 標 bu_overrode。"""
     session = db.get(SessionRow, session_id)
     if session is None or session.user_id != user.user_id:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "session not found")
-    await session_service.override_ai_necessity_warning(db, session)
+    sid = session_id
+    _spawn(lambda: _ai_necessity_decision_bg(sid, "override"), f"ai_override:{sid}")
     return AcceptedResponse()
 
 
@@ -260,13 +272,13 @@ async def explain_ai_necessity(
     session = db.get(SessionRow, session_id)
     if session is None or session.user_id != user.user_id:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "session not found")
-    # 用 spawn 跑 LLM streaming(別讓 endpoint 等 5-15 秒)
     sid = session_id
-    _spawn(lambda: _explain_ai_bg(sid), f"explain:{sid}")
+    _spawn(lambda: _ai_necessity_decision_bg(sid, "explain"), f"ai_explain:{sid}")
     return AcceptedResponse()
 
 
-async def _explain_ai_bg(session_id: uuid.UUID) -> None:
+async def _ai_necessity_decision_bg(session_id: uuid.UUID, kind: str) -> None:
+    """三個 modal endpoint 的背景 runner;dispatch 到對應 service handler。"""
     from app.core.db import SessionLocal
 
     db = SessionLocal()
@@ -274,7 +286,14 @@ async def _explain_ai_bg(session_id: uuid.UUID) -> None:
         session = db.get(SessionRow, session_id)
         if session is None:
             return
-        await session_service.explain_solution_class(db, session)
+        if kind == "acknowledge":
+            await session_service.acknowledge_ai_necessity_warning(db, session)
+        elif kind == "override":
+            await session_service.override_ai_necessity_warning(db, session)
+        elif kind == "explain":
+            await session_service.explain_solution_class(db, session)
+        else:
+            log.warning("ai_necessity_decision_bg.unknown_kind", kind=kind)
     finally:
         db.close()
 
@@ -285,12 +304,26 @@ async def dismiss_stage5_stuck(
     user: Annotated[User, Depends(current_user)],
     db: Annotated[Session, Depends(get_db)],
 ) -> AcceptedResponse:
-    """BU 在 stage 5 卡關 modal 點「再聊一下」。"""
+    """BU 在 stage 5 卡關 modal 點「再聊一下」:agent 用 LLM stream 一段帶脈絡的承接。"""
     session = db.get(SessionRow, session_id)
     if session is None or session.user_id != user.user_id:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "session not found")
-    await session_service.dismiss_stage5_stuck(db, session)
+    sid = session_id
+    _spawn(lambda: _stage5_dismiss_bg(sid), f"stage5_dismiss:{sid}")
     return AcceptedResponse()
+
+
+async def _stage5_dismiss_bg(session_id: uuid.UUID) -> None:
+    from app.core.db import SessionLocal
+
+    db = SessionLocal()
+    try:
+        session = db.get(SessionRow, session_id)
+        if session is None:
+            return
+        await session_service.dismiss_stage5_stuck(db, session)
+    finally:
+        db.close()
 
 
 @router.post("/{session_id}/stage5/quick-handoff", response_model=AcceptedResponse)
@@ -403,6 +436,28 @@ async def section_action(
         content_md=sec.get("draft_content", ""),
         last_edit_by=sec.get("last_edit_by"),
     )
+
+
+@router.post(
+    "/{session_id}/sections/{section_id}/select", response_model=AcceptedResponse
+)
+async def select_section(
+    session_id: uuid.UUID,
+    section_id: str,
+    user: Annotated[User, Depends(current_user)],
+    db: Annotated[Session, Depends(get_db)],
+) -> AcceptedResponse:
+    """BU 主動切到某章節:reset 該章為 needs_round2 並推進 graph 走 section_loop。"""
+    session = db.get(SessionRow, session_id)
+    if session is None or session.user_id != user.user_id:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "session not found")
+    try:
+        await session_service.select_section(db, session, section_id)
+    except KeyError as e:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, str(e)) from e
+    except ValueError as e:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e)) from e
+    return AcceptedResponse()
 
 
 @router.post("/{session_id}/submit", response_model=Deliverables)

@@ -49,6 +49,7 @@ class SessionRow(Base):
     bu: Mapped[str] = mapped_column(String, nullable=False)
     sme_role: Mapped[str] = mapped_column(String, nullable=False)
     raw_hint: Mapped[str | None] = mapped_column(Text, nullable=True)
+    llm_model: Mapped[str | None] = mapped_column(String, nullable=True)
     mode: Mapped[str] = mapped_column(String, nullable=False)  # explore/consult_step1/...
     stage: Mapped[int | None] = mapped_column(Integer, nullable=True)
     status: Mapped[str] = mapped_column(String, nullable=False, default="active")

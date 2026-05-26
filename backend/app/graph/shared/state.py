@@ -54,6 +54,8 @@ class TraceEntry(BaseModel):
     bu_choice_flag: bool = False
     linked_candidate_id: int | None = None
     timestamp: str
+    # Consult Step 2 章節訪談時,標記 trace 對應的章節 id;Explore 階段為 None
+    section_id: str | None = None
 
 
 class PainSignalDraft(BaseModel):
@@ -149,6 +151,8 @@ class GraphState(BaseModel):
     bu: str
     sme_role: str
     raw_hint: str | None = None
+    # 該 session 全程使用的 LLM 模型 id（前端建 session 時挑一次,中途不換）
+    llm_model: str | None = None
 
     # dialog（replace semantics；節點要 append 時自己讀 + concat）
     history: list[TraceEntry] = Field(default_factory=list)
@@ -163,16 +167,22 @@ class GraphState(BaseModel):
     # Stage 5 卡關偵測:
     # - stage_5_rounds:在 stage 5 已跑過幾輪 discovery_loop
     # - stage_5_stuck_acked:BU 已在 stuck modal 點過「再聊一下」,本 session 不再彈
+    # - pending_stage5_decision:stage5_stuck 已發、等 BU 在 modal 做選擇,
+    #   期間 graph 不再產 agent 回覆;dismiss / quick_handoff endpoint 後 clear
     stage_5_rounds: int = 0
     stage_5_stuck_acked: bool = False
+    pending_stage5_decision: bool = False
 
     # AI 必要性 triage:
     # - low_ai_necessity_streak:top 1 候選連續被 LLM 標 low 的次數
     # - ai_necessity_warned:已彈過 warning modal,本 session 不再彈
     # - bu_overrode_ai_necessity:BU 看過 warning 仍堅持用 AI(會寫進 BRD)
+    # - pending_ai_necessity_decision:彈窗已發、等 BU 在 modal 做選擇,
+    #   期間 graph 不再產 agent 回覆;三個 modal endpoint 之一被呼叫後 clear
     low_ai_necessity_streak: int = 0
     ai_necessity_warned: bool = False
     bu_overrode_ai_necessity: bool = False
+    pending_ai_necessity_decision: bool = False
 
     # dual output
     structured_json: dict | None = None

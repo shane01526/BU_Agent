@@ -1,4 +1,4 @@
-{# v2.0 2026-05-14 — 候選評分 + AI 必要性 triage #}
+{# v2.1 2026-05-19 — 加 high 範例 + rationale 風格規則 #}
 ## 任務
 把目前的 pain signals 聚類成 1-3 個候選方向,各打分(5 維 rubric)、判斷**最小可行解類別**、與 AI 必要性。
 
@@ -63,14 +63,24 @@ BU 的工程資源有限,做錯方向會浪費好幾週。
   "solution_rationale": "GROUP BY 月份 + 類型即可產出趨勢,SQL view 加排程即解。"
 }
 
-### 範例 3:確實需要 LLM
+### 範例 3:確實需要 LLM(extract)
 {
   "direction": "理賠文件型別自動分類",
   "process_target": "理賠文件",
   "project_type": "分類",
   "solution_class": "llm_extract",
   "ai_necessity": "high",
-  "solution_rationale": "輸入是非結構化掃描檔(PDF / 影像 / Email),類別 30+ 種且有混淆,規則窮舉成本極高。"
+  "solution_rationale": "輸入為非結構化掃描檔(PDF / 影像 / Email)、類別 30+ 種且常混淆;規則窮舉維護成本極高,LLM 抽取能彈性處理新類型。"
+}
+
+### 範例 4:確實需要 LLM(reason)
+{
+  "direction": "保戶通訊內容風險等級判讀",
+  "process_target": "客訴 / Email 通訊紀錄",
+  "project_type": "分類",
+  "solution_class": "llm_reason",
+  "ai_necessity": "high",
+  "solution_rationale": "需綜合語境(委婉抱怨、隱含投訴意圖)+ 業務規則判斷風險等級;不是關鍵字配對能解,classical ML 也缺標註資料,需 LLM 做語意推理。"
 }
 
 {% if kc %}
@@ -95,4 +105,6 @@ BU 的工程資源有限,做錯方向會浪費好幾週。
 - project_type ∈ {分類 / 抽取 / 摘要 / 生成 / QA / 排序 / 異常偵測}
 - score 1-5 整數,保守給分
 - solution_class / ai_necessity 嚴格依上述判斷流程
-- solution_rationale 一句話、< 80 字、要點出「為什麼這類就夠 / 為什麼非要 AI」
+- **solution_rationale 必須 40-80 字**,要點出「為什麼這類就夠 / 為什麼非要 AI」,
+  且**至少引用一個 BU 在 pain signals 中提到的具體業務名詞**(流程名 / 系統名 / 文件型別 / 量能等)。
+  不要寫「成本低」「快」這種泛泛的話。

@@ -1,0 +1,88 @@
+%% ID: S03 | Title: Explore 送訊息一輪 | Last updated 2026-05-25
+%% User action：BU 在對話區送一則訊息（Explore mode 階段 1-5 任一）
+%% 涵蓋：postMessage → bg run_turn → graph entry → extract_signals/cluster/score/converge
+%%       → discovery_loop / acknowledge_and_guide → SSE delta/done → turn_done
+sequenceDiagram
+    autonumber
+    actor BU
+    participant FE as Frontend<br/>(ChatPanel + page.tsx)
+    participant API as FastAPI<br/>(sessions.py)
+    participant SVC as session_service.py
+    participant G as Graph<br/>(LangGraph)
+    participant LLM
+    participant Bus as SSE Bus
+
+    BU->>FE: 輸入訊息 + 送出
+    FE->>FE: setAwaitingAgenttrue
+    FE->>API: POST /sessions/{id}/messages {text}
+    API->>API: _spawn(_run_turn_bg(sid, text))
+    API-->>FE: 202 AcceptedResponse
+
+    Note over SVC,Bus: 背景：run_turnsession_service.py:50
+    SVC->>G: aget_state → 既有 GraphState
+    SVC->>G: aupdate_state<br/>{history: history + [bu_trace]}<br/>(replace semantics)
+    SVC->>Bus: publish bu_turn_recorded<br/>{turn_id, text}
+    Bus-->>FE: SSE bu_turn_recorded
+    FE->>FE: append BU 泡泡到 liveMessages
+
+    SVC->>G: ainvoke{} 從 START 跑 super-step
+    G->>G: entry_router（subgraph.py:30）<br/>看 history 含 BU reply<br/>→ extract_signals
+    G->>LLM: extract_signals.j2<br/>+ chat_structuredPainSignalListOutput
+    LLM-->>G: pain signals
+    G->>Bus: publish pain_signal_added × N
+    Bus-->>FE: SSE pain_signal_added
+
+    G->>G: cluster_pain_points（M4 no-op）
+    G->>LLM: score_candidates.j2<br/>+ chat_structuredCandidateListOutput<br/>含 5 維 score + solution_class + ai_necessity
+    LLM-->>G: scored candidates
+    G->>Bus: publish candidate_updated
+    Bus-->>FE: SSE candidate_updated<br/>更新工作區候選卡
+
+    alt top1 ai_necessity=low 連續≥2 + 未 warned
+        G->>Bus: publish ai_necessity_warning
+        G->>G: patch ai_necessity_warned=True<br/>+ pending_ai_necessity_decision=True
+        Bus-->>FE: SSE ai_necessity_warning<br/>→ setAiNecessityWarn...<br/>(見 S05 後續)
+    end
+
+    G->>G: converge_check（nodes.py:431）<br/>stage 推進<br/>cold / stuck 偵測
+    alt stage=5 + 未選 + stage_5_rounds≥3 + 未 acked
+        G->>Bus: publish stage5_stuck
+        G->>G: patch pending_stage5_decision=True
+        Bus-->>FE: SSE stage5_stuck → setStage5Stuck...<br/>(見 S06 後續)
+    else 2 連續否定
+        G->>G: set mode='cold'
+        G->>Bus: publish cold_exit
+    end
+
+    Note over G: after_converge 七分支（subgraph.py:53）
+    alt pending_ai_necessity_decision OR pending_stage5_decision
+        G-->>SVC: END（不產 agent 回覆，等 modal endpoint 接手）
+    else mode=cold
+        G-->>SVC: END
+    else stage≥4 + needs_divergent_question
+        G->>LLM: explore_question.j2 chat_stream<br/>(含 meta 問題承接最高優先規則)
+        loop streaming
+            LLM-->>G: chunk
+            G->>Bus: publish agent_reply_delta
+            Bus-->>FE: SSE agent_reply_delta<br/>setAwaitingAgentfalse
+        end
+        G->>Bus: publish agent_reply_done
+    else stage≥4 + 其他
+        G->>LLM: acknowledge_and_guide.j2<br/>(承接 + 引導去看候選卡)
+        loop streaming
+            LLM-->>G: chunk → publish agent_reply_delta
+            Bus-->>FE: SSE agent_reply_delta
+        end
+        G->>Bus: publish agent_reply_done
+    else 一般輪
+        G->>LLM: explore_question.j2<br/>(下一階段 seed 改寫)
+        loop streaming
+            LLM-->>G: chunk → publish agent_reply_delta
+            Bus-->>FE: SSE agent_reply_delta
+        end
+        G->>Bus: publish agent_reply_done
+    end
+
+    G-->>SVC: state（updated）
+    SVC->>Bus: publish turn_done<br/>(兜底，無論 graph 路徑)
+    Bus-->>FE: SSE turn_done<br/>setAwaitingAgentfalse

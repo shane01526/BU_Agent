@@ -1,0 +1,43 @@
+%% ID: L1.2 | Title: Consult Subgraph | Last updated 2026-05-25
+%% 對應檔：backend/app/graph/consult/subgraph.py + backend/app/graph/consult/nodes.py
+%% 兩階段：Step 1 建大綱（load_template + auto_fill_outline）/ Step 2 訪談（section_loop）
+%% 末端 quality_gate；外部 service 設 mode='submit' 觸發 build_deliverables
+flowchart TD
+    Start(["START<br/>thread_id = session_id"]) --> Entry{"entry<br/>subgraph.py:42-53<br/>依 mode + outline 狀態分流"}
+
+    Entry -- "1.mode='submit'<br/>(submit_session 設)" --> BuildDeliv["build_deliverables<br/>nodes.py:552<br/>(組 BRD markdown + summary.json + flag_for_ba_review)"]
+    Entry -- "2.brd_outline 空<br/>(首進 consult_step1)" --> LoadTpl["load_template_node<br/>nodes.py:127<br/>(讀 templates/brd/[bu]_[type].yaml)<br/>fallback: default.yaml"]
+    Entry -- "3.有 needs_round2 章節" --> SectionLoop
+    Entry -- "4.全部章節已 != needs_round2" --> QGate
+
+    LoadTpl --> AutoFill["auto_fill_outline<br/>nodes.py:167<br/>(LLM structured → SectionDraftListOutput)<br/>prompt: auto_fill_outline.j2<br/>產各章 draft + 初始 status"]
+
+    AutoFill -- "publish outline_ready<br/>{sections}" --> AutoFill
+    AutoFill -- "set current_section_idx<br/>+ mode='consult_step2'" --> SectionLoop["section_loop<br/>nodes.py:314<br/>(LLM stream 對 needs_round2 章節提問)<br/>prompt: section_question.j2"]
+
+    SectionLoop -- "publish current_section_changed" --> SectionLoop
+    SectionLoop -- "publish agent_reply_delta×N<br/>+ agent_reply_done<br/>{turn_id, section_id}" --> EndOK(["END<br/>等 BU reply / inline edit / action"])
+
+    QGate["quality_gate<br/>nodes.py:510<br/>(LLM cross-section conflict check)<br/>prompt: quality_gate.j2<br/>M3 mock：永遠 pass"]
+    QGate -- "命中 conflicts<br/>publish conflict_detected" --> EndOK
+    QGate -- "無 conflict" --> EndOK
+
+    BuildDeliv -- "寫 deliverables 表<br/>publish deliverables_ready (推測)" --> EndOK
+
+    %% 外部 service 入口（不是 graph 內部 node，但相關）
+    SVC1[("BU 在 chat 回 BU reply<br/>session_service.run_turn 後<br/>_integrate_bu_answer_to_section<br/>session_service.py:203<br/>LLM merge BU answer 進 draft")]
+    SVC1 -.-> SectionLoop
+    SVC2[("BU inline edit / action<br/>edit_section session_service.py:305<br/>section_action session_service.py:345")]
+    SVC2 -.-> EndOK
+    SVC3[("BU 點 strip 切章<br/>select_section session_service.py:419<br/>reset 章為 needs_round2 + ainvoke")]
+    SVC3 -.-> SectionLoop
+    SVC4[("BU 點送 BA<br/>submit_session session_service.py:477<br/>aupdate_state mode='submit' + ainvoke")]
+    SVC4 -.-> BuildDeliv
+
+    classDef llm fill:#dbeafe,stroke:#1e40af,color:#1e3a8a
+    classDef sse fill:#d1fae5,stroke:#047857,color:#064e3b
+    classDef endNode fill:#fee2e2,stroke:#991b1b,color:#7f1d1d
+    classDef external fill:#f3e8ff,stroke:#6b21a8,color:#581c87
+    class AutoFill,SectionLoop,QGate,BuildDeliv llm
+    class EndOK endNode
+    class SVC1,SVC2,SVC3,SVC4 external

@@ -1,0 +1,60 @@
+%% ID: L0 | Title: BU Agent 端到端旅程 | Last updated 2026-05-25
+%% 視角：從 BU 第一次開啟 web app 到送 BA Agent 的完整高層旅程
+%% 涵蓋三個 mode（explore / consult_step1 / consult_step2 / cold / done）
+%% + 三個彈窗類型（HandoffConfirm / AiNecessityWarning / Stage5Stuck）
+flowchart TD
+    Login(["登入<br/>/login"]) --> Lobby["Sessions 列表<br/>/sessions"]
+    Lobby -- "點開始新諮詢" --> NewSess["New Session 表單<br/>/sessions/new<br/>(app/sessions/new/page.tsx)"]
+    Lobby -- "點舊 session" --> Resume["Resume 既有 session<br/>useQuery getSession + SSE 重連<br/>(S02 詳述)"]
+
+    NewSess -- "GET /api/v1/models<br/>動態抓 OpenAI+Gemini 過濾後清單" --> NewSess
+    NewSess -- "送出 createSession<br/>{bu, sme_role, raw_hint, llm_model}" --> CreateSvc["create_session<br/>(session_service.py:24)<br/>+ background _run_turn_bg"]
+    CreateSvc --> ExploreEnter["進入 Explore mode<br/>對話區出現第一題<br/>(discovery_loop nodes.py:124)"]
+
+    Resume --> ExploreEnter
+
+    ExploreEnter --> ExploreLoop{"Explore<br/>對話迴圈"}
+    ExploreLoop -- "BU 送訊息一輪<br/>POST /messages" --> Score["score_candidates<br/>nodes.py:311<br/>產 candidates + ai_necessity 標記"]
+    Score -- "top1 ai_nec=low<br/>連續≥2 次<br/>+ 未 warn 過" --> AiModal["/AiNecessityWarningModal/<br/>(S05 詳述)"]
+    Score --> Converge["converge_check<br/>nodes.py:431<br/>stage 推進 / cold / stuck 偵測"]
+    Converge -- "stage 5<br/>連 3 輪未選 candidate<br/>+ 未 acked" --> StuckModal["/Stage5StuckModal/<br/>(S06 詳述)"]
+    Converge -- "2 連續 BU 否定<br/>mode=cold" --> Cold["Cold Exit<br/>SSE cold_exit<br/>(建議離線找 BA)"]
+    Converge --> NextRound["discovery_loop 或<br/>acknowledge_and_guide<br/>產下一輪 agent 回覆"]
+    NextRound --> ExploreLoop
+
+    AiModal -- "我了解了 / 還是想用 AI / 想了解差別" --> ResumeExplore["BU label 進 history<br/>+ agent stream 對應回應"]
+    ResumeExplore --> ExploreLoop
+    AiModal -- "換個角度重新發想" --> ResetEx
+    StuckModal -- "再聊一下" --> ResumeExplore
+    StuckModal -- "換個角度重新發想" --> ResetEx["reset_explore<br/>session_service.py:853<br/>(S11 詳述)"]
+    ResetEx --> ExploreEnter
+
+    ExploreLoop -- "BU 點候選卡<br/>POST /candidates/select<br/>或 stage5 quick_handoff" --> EmitDual["emit_dual_output<br/>nodes.py:551<br/>產 paragraph + structured JSON<br/>(含 ai_necessity_triage)"]
+    EmitDual -- "SSE handoff_ready" --> Handoff["/HandoffConfirmModal/<br/>(S07 詳述)"]
+    Handoff -- "再討論一下" --> ExploreLoop
+    Handoff -- "進入 Consult mode" --> Consult1
+
+    Cold --> Lobby
+
+    Consult1["Consult Step 1<br/>load_template + auto_fill_outline<br/>nodes.py:127, 167"] --> Consult2["Consult Step 2<br/>section_loop 訪談 needs_round2 章節<br/>nodes.py:314"]
+
+    Consult2 -- "BU inline edit" --> EditSec["editSection<br/>session_service.py:305"]
+    Consult2 -- "BU 點 Accept/Refine/Skip/Flag" --> ActSec["section_action<br/>session_service.py:345"]
+    Consult2 -- "BU 點 strip 切章" --> SelectSec["select_section<br/>session_service.py:419<br/>(含 RevisitSection 防呆)"]
+    EditSec --> Consult2
+    ActSec --> Consult2
+    SelectSec --> Consult2
+
+    Consult2 -- "全部章節 != needs_round2" --> QGate["quality_gate<br/>nodes.py:510<br/>跨章節衝突檢查"]
+    QGate -- "BU 點送 BA" --> Submit["submit_session<br/>session_service.py:477<br/>+ build_deliverables nodes.py:552"]
+    Submit --> Done(["完成畫面<br/>/sessions/[id]/done"])
+
+    classDef llm fill:#dbeafe,stroke:#1e40af,color:#1e3a8a
+    classDef sse fill:#d1fae5,stroke:#047857,color:#064e3b
+    classDef modal fill:#fef3c7,stroke:#b45309,color:#78350f
+    classDef coldNode fill:#fee2e2,stroke:#991b1b,color:#7f1d1d
+    classDef terminal fill:#e9d5ff,stroke:#6b21a8,color:#581c87
+    class Score,EmitDual,Consult1,Consult2,QGate,NextRound llm
+    class AiModal,StuckModal,Handoff modal
+    class Cold coldNode
+    class Done,Submit terminal

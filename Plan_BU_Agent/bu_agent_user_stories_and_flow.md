@@ -6,6 +6,12 @@
 > 目的：從 overview 中萃取可直接用於 PRD / 開發規劃的 User Stories 清單，並把「BU 端體感旅程」展開成可執行的端到端詳細流程步驟
 > 範圍：僅涵蓋 **BU Agent 階段**（Explore mode + Consult mode）；BA Agent 僅在交接點出現
 
+> **Last updated 2026-05-25** — 同步至 code 現況。本次主要變更：
+> - Epic A 補一條 story：BU 在 New Session 頁可選 LLM 模型
+> - 新增 **Epic H — AI 必要性決策**（4 條 stories：看到警示 / 我了解了 / 還是想用 AI / 想了解差別）
+> - 新增 **Epic I — Stage 5 卡關處理**（2 條 stories：再聊一下換切角 / 先用 #N 試試 BRD）
+> - Phase 1 補 Phase B1（AI 必要性彈窗 deferred-reply 流程）、Phase 1 末加 Phase B2（Stage 5 卡關彈窗流程）
+
 ---
 
 ## 目錄 (Table of Contents)
@@ -102,14 +108,26 @@
 
 #### A2. 開場 metadata 表單
 > **身為** BU，
-> **我想要** 在開場表單填 BU 別、角色簡述、（選填）第一句 hint，
-> **以便** agent 開場就能聚焦到我的領域脈絡。
+> **我想要** 在開場表單填 BU 別、角色簡述、（選填）第一句 hint、（選填）LLM 模型，
+> **以便** agent 開場就能聚焦到我的領域脈絡，並用我偏好的 LLM 跑全程對話。
 
 - **AC**：
   - BU 別（必填；產險 / 壽險 / 銀行 / 證券 / 投信 …）
   - 角色簡述（必填；1–2 句）
   - Raw text hint（選填）
+  - **[新增 2026-05-25] LLM 模型**：下拉選單從 `GET /api/v1/models` 動態抓（OpenAI + Gemini 過濾後可用 chat 模型，按 provider 分組），預設 `DEFAULT_MODEL` env，缺對應 key 的選項自動 disabled；session 級綁定（中途不換）
   - 送出後工作區顯示 Explore mode 介面、對話區出現第一題
+
+#### A2.1 LLM 模型選擇（[新增 2026-05-25]）
+> **身為** BU，
+> **我想要** 在新建 session 時挑選想用的 LLM 模型，
+> **以便** 我能用偏好或團隊指定的模型完成本次 BRD 草擬。
+
+- **AC**：
+  - `/sessions/new` 頁面顯示模型下拉，按 OpenAI / Gemini 分組
+  - 模型清單來自 `GET /api/v1/models`（5 分鐘 cache），失敗時 fallback 至 `.env` 的 `ALLOWED_MODELS`
+  - 後端缺該 provider 的 API key 時，對應選項 disabled 並顯示「後端 key 未設定」
+  - 預設值取 `DEFAULT_MODEL`；session 建立後 model 寫入 `sessions.llm_model`，全程使用
 
 
 #### A3. 跨日 Resume
@@ -457,6 +475,92 @@
 - **AC**：
   - 候選方向由 BU 選擇
   - 章節有 Accept / Refine / Skip 而非自動 confirm
+
+---
+
+### Epic H — AI 必要性決策（[新增 2026-05-25]）
+
+對應 `agent_dialog_logic.md` §7.3 與 `score_candidates` 的 ai_necessity triage 機制。
+
+#### H1. 看到「這可能不需要 AI」警示
+> **身為** BU，
+> **我想要** 當系統判斷我描述的需求其實用更輕的方案（rule / RPA / pipeline 等）就能解時收到提醒，
+> **以便** 我不會因為慣性而把所有事情都丟給 AI、後續 BA Agent 也能對齊期望。
+
+- **AC**：
+  - score_candidates 偵測 top1 候選連續 2 輪 `ai_necessity == "low"` 時彈 `AiNecessityWarningModal`
+  - Modal 顯示 `solution_class`（rpa / classical_ml / …）與 `rationale`
+  - **彈窗期間 graph 暫停**，agent **不**對「觸發彈窗的 BU 訊息」回覆，輸入框 disabled
+  - 本 session 已警示過（`ai_necessity_warned=True`）後不再重彈，即使 streak 仍 ≥ 2
+
+#### H2. 點「我了解了，讓我繼續想想」
+> **身為** BU，
+> **我想要** 點此選項後 agent 給我帶脈絡的承接、引導我繼續探索，而不是冷掉，
+> **以便** 我能順著想多看幾個切角。
+
+- **AC**：
+  - POST `/ai-necessity/acknowledge` → 對話區先出現 BU 泡泡「我了解了，讓我繼續想想」(寫進 history)
+  - 然後 agent stream 一段 80-150 字回應（用 `acknowledge_ai_necessity.j2`，含當前 top 候選 + pain signals 脈絡），不再勸退
+  - State patch：`ai_necessity_warned=True`、`pending_ai_necessity_decision=False`
+
+#### H3. 點「我有理由，還是想用 AI 試試看」
+> **身為** BU，
+> **我想要** 在系統勸退後仍能堅持用 AI 並讓 BA 知道我的決定，
+> **以便** 我的業務脈絡判斷不被忽略。
+
+- **AC**：
+  - POST `/ai-necessity/override` → BU 泡泡「我有理由，還是想用 AI 試試看」
+  - agent stream 一段承接（`override_ai_necessity.j2`，不勸退、複述 top1 direction、邀補理由）
+  - State patch：`ai_necessity_warned=True`、`bu_overrode_ai_necessity=True`、`pending_ai_necessity_decision=False`
+  - 最終 BRD structured JSON 內 `ai_necessity_triage.bu_overrode = true`，BA Agent / AI 科 review 時可見
+
+#### H4. 點「想了解 X 跟 AI 的差別」
+> **身為** BU，
+> **我想要** 系統用白話解釋 X (rule / rpa / classical_ml / …) 跟 AI 的差別，
+> **以便** 我能理性判斷是否真需要 AI。
+
+- **AC**：
+  - POST `/ai-necessity/explain` → BU 泡泡「想了解 X 跟 AI 的差別」
+  - agent stream 一段比較（`explain_solution_class.j2`，500-700 字、3 段，含 7 類 cheat sheet 對應段落）
+  - 結尾不下結論、丟一個開放問句
+
+---
+
+### Epic I — Stage 5 卡關處理（[新增 2026-05-25]）
+
+對應 `agent_dialog_logic.md` §7.2 與 `converge_check` 的 stage5 stuck 機制。
+
+#### I1. 在 Stage 5 連 3 輪選不出方向被偵測
+> **身為** BU，
+> **我想要** 當我反覆看候選但選不出方向時系統能主動提供出口，
+> **以便** 我不會在 stage 5 無限打轉。
+
+- **AC**：
+  - converge_check 偵測 stage 5 + selected_candidate is None + stage_5_rounds >= 3 時彈 `Stage5StuckModal`
+  - Modal 顯示連聊輪數與 top 3 候選
+  - **彈窗期間 graph 暫停**，輸入框 disabled
+  - 本 session 已 ack 過後不再彈
+
+#### I2. 點「再聊一下，我想想」
+> **身為** BU，
+> **我想要** 當我選不出來時 agent 能換個切角幫我釐清，
+> **以便** 我不必硬選。
+
+- **AC**：
+  - POST `/stage5/dismiss` → BU 泡泡「再聊一下，我想想」
+  - agent stream 80-150 字承接（`stage5_keep_talking.j2`，肯定 BU 重新評估、提換切角探索方向）
+  - State patch：`stage_5_stuck_acked=True`、`pending_stage5_decision=False`
+
+#### I3. 點「先用 #N 試試 BRD」
+> **身為** BU，
+> **我想要** 在猶豫不決時可選一個候選直接進 Consult mode 試試，
+> **以便** 看到實際 BRD 後再決定要不要回頭調整。
+
+- **AC**：
+  - POST `/stage5/quick-handoff` 帶 `rank` → BU 泡泡「先用 #N 試試 BRD」
+  - **不 stream agent reply**，直接走 emit_dual_output → handoff 流程
+  - State patch：`selected_candidate=N`、`ready_to_handoff=True`、`stage_5_stuck_acked=True`、`pending_stage5_decision=False`
+  - 後續行為跟正常選定 candidate 進入 Consult 一致
 
 ---
 

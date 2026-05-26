@@ -6,6 +6,11 @@
 > 對應實作：`backend/app/graph/` (LangGraph nodes + Jinja2 prompts + YAML 模板)
 > 用途：當 BU 體感「agent 怎麼會這樣問？」、「為什麼章節這樣填？」時,直接看本文找出規則來源與調整入口
 
+> **Last updated 2026-05-25** — 同步至 code 現況。本次主要變更：
+> - §2.2 補 meta 問題承接規則（最高優先：BU 問「還有其他方向 / 多給幾個 / 換個角度」時先承接 ≤50 字 + 第二句新題）
+> - 新增 §2.6 deferred-reply pattern 4 個新 prompt：`acknowledge_ai_necessity.j2` / `override_ai_necessity.j2` / `explain_solution_class.j2` / `stage5_keep_talking.j2`
+> - 新增 §2.7 Solution class 7 類 cheat sheet（rule / rpa / pipeline / classical_ml / llm_extract / llm_reason / agent；之前只在 `explain_solution_class.j2` 內，未文件化）
+
 ---
 
 ## 0. TL;DR
@@ -110,9 +115,25 @@
    - 最近 8 輪對話歷史
    - 當前候選方向(若已有)
    - 該階段 seed 題目(僅供參考,可改寫)
-4. **Gemini stream 產出**:題目長度限制 ≤ 60 字
+4. **LLM stream 產出**(對應 session 的 `llm_model`):題目長度限制 ≤ 60 字
+   - Stage 4-5 + 已有候選 + BU 對候選不滿時 ≤ 80 字、含承接句
 5. **fallback**:LLM 回空字串時退回 stage seed 第一條
 6. SSE `agent_reply_delta` / `agent_reply_done` 推給前端
+
+**[新增 2026-05-25] meta 問題承接規則（最高優先）**：
+
+`explore_question.j2` 在「你的任務」段最前面有一條最高優先規則,讓 LLM 偵測 BU 是否在問
+meta 問題（針對 stage 4-5 + 已有候選的情境特別重要）：
+
+- 直接問「還有沒有其他方向 / 還有別的嗎 / 能不能多給幾個 / 換個角度看 / 再來幾個 / 想試別的」
+- 對候選不夠滿意但沒否定具體某條（僅說「不太貼切」「不夠具體」「太表面」「都不太對」）
+
+LLM 必須**第一句直接回應 meta 問題（≤ 50 字承接）**,例：
+- 「好,我換個角度,從『XX 流程』再想看看。」(XX 帶當前候選未涵蓋的具體環節)
+- 「理解,我從更前端的『XX 環節』試試,看是否更貼近你的痛點。」
+
+**第二句**才是新探索題（≤ 60 字、挑 stage seeds 中未在 recent_history 出現過的切角）。
+整體 ≤ 110 字、最多 2 句。**不**動 routing、**不**重跑 score_candidates；單純文字承接。
 
 ### 2.3 Pain signals 抽取規則
 
@@ -157,6 +178,37 @@
 - 200–400 字的需求描述
 - 涵蓋 4 點:BU 想解決的問題、AI 切入位置、預期 IO 形式、BU 已認可 vs agent 推斷的部分
 - 字數守門:< 80 或 > 600 退回 deterministic 模板
+
+### 2.6 Deferred-reply 彈窗 prompts（[新增於 2026-05-25]）
+
+四個新 prompt,對應 `agent_dialog_logic.md` §7 三個 modal 的 endpoint handler。
+共同特徵：彈窗發出時 graph 暫停（`pending_*_decision` flag），BU 點選項後 endpoint 才用對應 prompt 跑 LLM stream。
+
+| Prompt 檔 | 觸發 endpoint | 用途 | 輸出長度 | 注入變數 |
+| --- | --- | --- | --- | --- |
+| `acknowledge_ai_necessity.j2` | `/ai-necessity/acknowledge` | BU 點「我了解了，讓我繼續想想」時的 agent 承接：肯定停下來想、輕量點 2-3 個切角、結尾留 follow-up 問句 | 80-150 字、≤ 2 句 | `bu`, `sme_role`, `solution_class`, `rationale`, `direction`, `process_target`, `recent_pain_signals`, `last_bu_text` |
+| `override_ai_necessity.j2` | `/ai-necessity/override` | BU 點「我有理由，還是想用 AI 試試看」時的 agent 承接：承接決定不勸退、複述 top1 direction、提示會把 `bu_overrode` 寫進 BRD 給 BA、邀請補理由 | 80-150 字 | 同上 |
+| `explain_solution_class.j2` | `/ai-necessity/explain` | BU 點「想了解 X 跟 AI 的差別」時的白話比較：用 7 類 cheat sheet 對應段落講優缺點 / 成本，結尾不下結論、丟開放問句 | 500-700 字、3 段 | 同上（`solution_class` 為主） |
+| `stage5_keep_talking.j2` | `/stage5/dismiss` | BU 在 stage 5 卡關 modal 點「再聊一下」時的 agent 承接：肯定 BU 重新評估、提軟性換切角（微調評估條件 / 重評個人指標 / 拆細候選 / 看相鄰流程） | 80-150 字 | `bu`, `sme_role`, `stage_5_rounds`, `top3_candidates`, `recent_pain_signals`, `last_bu_text` |
+
+**Fallback**：每個 prompt 對應的 service handler 都帶 `fallback_text`（寫死的安全句），LLM 失敗時 stream 該 fallback 兜底；BU UI 不卡死。
+
+### 2.7 Solution class 7 類 cheat sheet（[新增於 2026-05-25]）
+
+`score_candidates.j2` 強制每條候選標 `solution_class` 為以下 7 類之一,
+`explain_solution_class.j2` 也用此 cheat sheet 給 BU 白話解釋。
+
+| solution_class | 適合情境 | 限制 | 對應 ai_necessity |
+| --- | --- | --- | --- |
+| `rule` | 規則明確不變、可窮舉 | 改規則要動程式 | low |
+| `rpa` | 跨系統搬資料、無判斷 | 系統改版會壞 | low |
+| `pipeline` | 數據彙整、報表（SQL / 排程） | 沒辦法處理非結構化資料 | low–medium |
+| `classical_ml` | 結構化特徵 + 大量標註資料 | 比 LLM 便宜可解釋 | medium |
+| `llm_extract` | LLM 從文件抽結構化欄位、人工抽取耗時 | 要驗證準確率 | medium–high |
+| `llm_reason` | 需要語意理解 + 多步推理 | 準確率不可控 | high |
+| `agent` | LLM 多輪對話 + 工具呼叫、自動化複雜業務流程 | 最複雜也最貴 | high |
+
+`ai_necessity ∈ {low, medium, high}`：top1 連續 2 輪標 `low` 會觸發 `AiNecessityWarningModal`（細節見 `agent_dialog_logic.md` §4.4）。
 
 ---
 

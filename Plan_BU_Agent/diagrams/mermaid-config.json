@@ -1,0 +1,7 @@
+{
+  "flowchart": { "htmlLabels": false, "useMaxWidth": true },
+  "sequence": { "useMaxWidth": true },
+  "themeVariables": {
+    "fontFamily": "Microsoft YaHei, PingFang TC, Noto Sans TC, sans-serif"
+  }
+}

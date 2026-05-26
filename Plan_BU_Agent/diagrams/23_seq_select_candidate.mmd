@@ -1,0 +1,39 @@
+%% ID: S04 | Title: 點候選卡 → handoff_ready | Last updated 2026-05-25
+%% User action：BU 在工作區點候選卡片
+%% 對應 backend：select_candidate (session_service.py:897)
+%% 規則：候選清單已存在 + 還沒進 handoff → 自動觸發 emit_dual_output（不必走完 stage 5）
+sequenceDiagram
+    autonumber
+    actor BU
+    participant FE as Frontend<br/>(CandidateCards + page.tsx)
+    participant API as FastAPI
+    participant SVC as session_service.py
+    participant G as Graph
+    participant LLM
+    participant Bus as SSE Bus
+
+    BU->>FE: 點候選卡 #N
+    FE->>FE: setSelectedRankN<br/>setGeneratingHandofftrue
+    FE->>API: POST /sessions/{id}/candidates/select {rank: N}
+    API->>SVC: select_candidatedb, session, rank<br/>session_service.py:897
+    SVC->>G: aupdate_state {selected_candidate: N}
+    SVC->>G: aget_state
+    G-->>SVC: state
+
+    alt scored_candidates 非空 + 還沒 ready_to_handoff
+        SVC->>G: aupdate_state {ready_to_handoff: True}
+        SVC->>G: ainvoke{} 觸發 emit_dual_output
+        G->>G: entry_router 看 ready_to_handoff=True<br/>→ emit_dual_output（nodes.py:551）
+        G->>G: 組 structured JSON<br/>(含 ai_necessity_triage:<br/>selected_solution_class /<br/>selected_ai_necessity /<br/>selected_rationale /<br/>bu_overrode)
+        G->>LLM: emit_paragraph.j2 chat_stream<br/>產 200-400 字 paragraph
+        LLM-->>G: paragraph
+        G->>Bus: publish handoff_ready<br/>{paragraph, structured}
+    else 候選清單還沒形成
+        Note over SVC: 不觸發 handoff,<br/>只記錄 selected_candidate
+    end
+
+    SVC-->>API: GraphState
+    API-->>FE: 202 AcceptedResponse
+    Bus-->>FE: SSE handoff_ready
+    FE->>FE: setHandoff{paragraph}<br/>setGeneratingHandofffalse
+    Note over FE: HandoffConfirmModal 顯示<br/>BU 看到 200-400 字段落描述<br/>（後續見 S07）

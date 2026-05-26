@@ -1,0 +1,51 @@
+%% ID: L1.1 | Title: Explore Subgraph | Last updated 2026-05-25
+%% 對應檔：backend/app/graph/explore/subgraph.py + backend/app/graph/explore/nodes.py
+%% 三個彈窗觸發點都用 SSE 灰盒標出（後續 modal endpoint 接手見 S05 / S06）
+flowchart TD
+    Start(["START<br/>thread_id = session_id"]) --> EntryRouter{"entry_router<br/>subgraph.py:30-43"}
+    EntryRouter -- "ready_to_handoff=True<br/>(BU 已選 candidate)" --> EmitDual
+    EntryRouter -- "history 含 BU reply" --> ExtSig["extract_signals<br/>nodes.py:188<br/>(LLM structured → PainSignalListOutput)<br/>prompt: extract_signals.j2"]
+    EntryRouter -- "首輪、history 空" --> DiscLoop
+
+    ExtSig -- "publish pain_signal_added" --> Cluster["cluster_pain_points<br/>nodes.py:305<br/>(M4 no-op，保拓撲)"]
+    Cluster --> Score["score_candidates<br/>nodes.py:311<br/>(LLM structured → CandidateListOutput)<br/>prompt: score_candidates.j2<br/>含 5 維 score + solution_class + ai_necessity"]
+
+    Score -- "publish candidate_updated" --> Score
+    Score -- "top1 ai_necessity=low<br/>連續≥2 輪 + 未 warned" --> AiWarn[/"publish ai_necessity_warning<br/>+ patch:<br/>ai_necessity_warned=True<br/>pending_ai_necessity_decision=True"/]
+    AiWarn --> Converge
+
+    Score --> Converge["converge_check<br/>nodes.py:431<br/>stage 遞進 1→5<br/>cold / stuck 偵測"]
+
+    Converge -- "stage=5 + selected_candidate=None<br/>+ stage_5_rounds≥3<br/>+ 未 acked" --> S5Stuck[/"publish stage5_stuck<br/>+ patch:<br/>pending_stage5_decision=True"/]
+    S5Stuck --> AfterC
+
+    Converge -- "2 連續否定 BU reply" --> ColdMark["set mode=cold<br/>publish cold_exit"]
+    ColdMark --> AfterC
+
+    Converge --> AfterC{"after_converge<br/>subgraph.py:53-72<br/>七分支按優先序"}
+
+    AfterC -- "1.pending_ai_necessity_decision" --> EndDeferred(["END<br/>等 modal endpoint 接手<br/>不產 agent 回覆"])
+    AfterC -- "2.pending_stage5_decision" --> EndDeferred
+    AfterC -- "3.mode=cold" --> EndCold(["END<br/>cold_exit"])
+    AfterC -- "4.ready_to_handoff=True" --> EmitDual["emit_dual_output<br/>nodes.py:551<br/>(LLM stream + deterministic JSON)<br/>prompt: emit_paragraph.j2"]
+    AfterC -- "5.scored + stage≥4<br/>+ needs_divergent_question True" --> DiscLoop
+    AfterC -- "6.scored + stage≥4<br/>+ 其他" --> AckGuide["acknowledge_and_guide<br/>nodes.py:491<br/>(LLM stream)<br/>prompt: acknowledge_and_guide.j2<br/>承接 + 引導去看右側候選卡"]
+    AfterC -- "7.else" --> DiscLoop["discovery_loop<br/>nodes.py:124<br/>(LLM stream)<br/>prompt: explore_question.j2<br/>含 meta 問題承接最高優先規則"]
+
+    EmitDual -- "publish handoff_ready<br/>{paragraph, structured}" --> EndOK
+    DiscLoop -- "publish agent_reply_delta×N<br/>+ agent_reply_done" --> EndOK(["END<br/>下一輪等 BU reply"])
+    AckGuide -- "publish agent_reply_delta×N<br/>+ agent_reply_done" --> EndOK
+
+    NDQ["needs_divergent_question<br/>nodes.py:95<br/>判 BU 對候選不滿"]
+    NDQ -.-> AfterC
+    NDQ -.- |"條件 A：BU 上句含 DISSATISFIED_KEYWORDS<br/>(其他/再來幾個/不太對/太表面 等)"| AfterC
+    NDQ -.- |"條件 B：上輪 ack_and_guide<br/>+ BU 沒選 + 沒提候選"| AfterC
+
+    classDef llm fill:#dbeafe,stroke:#1e40af,color:#1e3a8a
+    classDef sse fill:#d1fae5,stroke:#047857,color:#064e3b
+    classDef endNode fill:#fee2e2,stroke:#991b1b,color:#7f1d1d
+    classDef helper fill:#f3e8ff,stroke:#6b21a8,color:#581c87
+    class ExtSig,Cluster,Score,DiscLoop,AckGuide,EmitDual llm
+    class AiWarn,S5Stuck sse
+    class EndDeferred,EndCold endNode
+    class NDQ helper

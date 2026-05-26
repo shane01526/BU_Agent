@@ -1,4 +1,4 @@
-{# v1.0 2026-05-13 — Consult Step 2 章節提問 #}
+{# v2.1 2026-05-19 — 把續訪開場與收斂模式解耦,is_fresh_revisit 不再卡 accept_hint_count #}
 ## 任務
 針對章節「{{ section_title }}」對 BU 提出**一道**訪談問題。
 
@@ -10,10 +10,48 @@
 {% for q in seed_questions %}
   - {{ q }}
 {% endfor %}
-- 本章 BU 已回過幾次:{{ rounds_so_far }} 次
+- 本章已進行 {{ rounds_in_this_section }} 輪 BU 回應
+{% if was_visited %}- **本章先前已訪談過**(這是回頭續訪)
+{% endif %}
+
+{% if previous_qa %}
+## 本章節對話歷史(不可重問同面向)
+{% for qa in previous_qa %}
+- [{{ qa.role }}] {{ qa.text }}
+{% endfor %}
+{% endif %}
 
 ## 規則
-- 一句話、≤ 60 字
-- 開頭不要加「請問」「想了解」之類客套,直接切入
-- 問完之後,在心裡標註 BU 答不出來時可建議 flag_for_ba_review(這部分不寫在輸出)
-- 如果 rounds_so_far ≥ 2 且 BU 上輪明顯答不出來,改成「這部分要不要先 flag 給 BA?」
+1. 一句話、≤ 60 字
+2. 開頭不要加「請問」「想了解」之類客套,直接切入
+3. **不要重問已涵蓋的面向**:若上述歷史已涵蓋某 seed question,跳過該題
+4. 若 BU 上輪答覆已部分回答你想問的,改問**延伸面向或具體量化**,不要再問同層次
+{% if is_fresh_revisit %}
+5. **這是回頭續訪**(本章先前曾被 Accept / Skip / Flag,BU 主動點回來想再聊):
+   - 開場必須是「上次我們聊過 X / Y,你想新增或修正什麼?」(X / Y 從前述歷史挑兩個
+     最具體的關鍵面向)
+   - **絕對不可從零開始問**;BU 已經完整聊過這章
+   - 即使先前 history 有過 agent 的「Accept」提示,本輪也忽略,優先做續訪開場
+{% endif %}
+{% if rounds_in_this_section >= 3 and previous_qa|length >= 4 and not is_fresh_revisit %}
+6. **本章已聊過 3 輪以上、面向已多**,觸發收斂模式:
+{% if accept_hint_count == 0 %}
+   - 請改問:「以上資訊我覺得已能撐起本章節,要不要先 Accept 進下一章?」
+   - 不再追問新問題
+{% elif accept_hint_count == 1 %}
+{% if last_bu_is_short %}
+   - BU 上一句很短或像客套(例如「嗯」「OK」「好」),似乎沒新資訊。
+   - 改開:「我覺得這章資訊夠了。建議直接 Accept;若想跳過或交給 BA,
+     可點上方的 Skip 或 Flag → BA」
+{% else %}
+   - BU 上一句有新內容(>20 字 / 提到具體名詞),先消化它,問一個延伸面向。
+   - **本輪不再提 Accept**,避免騷擾
+{% endif %}
+{% else %}
+   - 你已提示 ≥ 2 次「要不要 Accept」。
+   - 改開:「這章先停在這裡。你右上方的 Skip / Flag → BA / Accept 任一個都可以推進」,
+     並停止追問新問題
+{% endif %}
+{% endif %}
+7. 若 rounds_in_this_section ≥ 2 且 BU 明顯答不出來(短答 / 都不知道 / 沒概念),
+   改成「這部分要不要先 flag 給 BA?」

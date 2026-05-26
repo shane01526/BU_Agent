@@ -1,0 +1,67 @@
+%% ID: S06 | Title: Stage5StuckModal 三選一 | Last updated 2026-05-25
+%% User action：BU 在 stage 5 卡關 modal 點選項
+%% 三個選項：
+%%   1. 再聊一下我想想 → /stage5/dismiss → LLM stream 換切角承接
+%%   2. 先用 #N 試試 BRD → /stage5/quick-handoff → 不 stream，直接走 emit_dual_output
+%%   3. 換個角度重新發想 → reset_explore（見 S11）
+sequenceDiagram
+    autonumber
+    actor BU
+    participant FE as Frontend<br/>(Stage5StuckModal + page.tsx)
+    participant API as FastAPI
+    participant SVC as session_service.py
+    participant G as Graph
+    participant LLM
+    participant Bus as SSE Bus
+
+    Note over BU,Bus: 前置：converge_check 已 publish stage5_stuck<br/>+ patch pending_stage5_decision=True 鎖住 graph
+
+    alt 選項 1：再聊一下我想想
+        BU->>FE: 點「再聊一下」
+        FE->>FE: setAwaitingAgenttrue<br/>setStage5Stucknull
+        FE->>API: POST /sessions/{id}/stage5/dismiss
+        API->>API: _spawn(_stage5_dismiss_bg(sid))<br/>sessions.py:316
+        API-->>FE: 202 AcceptedResponse
+
+        Note over SVC: dismiss_stage5_stuck（session_service.py:752）
+        SVC->>G: aget_state
+        SVC->>SVC: 取 top3 candidates 給 prompt
+        SVC->>SVC: _record_bu_option_choice<br/>label = 「再聊一下，我想想」
+        SVC->>G: aupdate_state {history: history + [bu_trace]}
+        SVC->>Bus: publish bu_turn_recorded
+        Bus-->>FE: SSE bu_turn_recorded → BU 泡泡
+
+        SVC->>SVC: render stage5_keep_talking.j2<br/>注入 top3_candidates / pain_signals / last_bu_text /<br/>stage_5_rounds
+        SVC->>SVC: _stream_agent_reply
+        SVC->>LLM: chat_stream（80-150 字承接「換切角」）
+        loop streaming
+            LLM-->>SVC: chunk → publish agent_reply_delta
+            Bus-->>FE: SSE agent_reply_delta<br/>setAwaitingAgentfalse
+        end
+        SVC->>Bus: publish agent_reply_done
+        Bus-->>FE: SSE agent_reply_done
+
+        SVC->>G: aupdate_state<br/>{history: history+[agent_trace],<br/> stage_5_stuck_acked=True,<br/> pending_stage5_decision=False}
+
+    else 選項 2：先用 #N 試試 BRD
+        BU->>FE: 點「先用 #N 試試 BRD」
+        FE->>FE: setStage5Stucknull<br/>setSelectedRankN<br/>setGeneratingHandofftrue
+        FE->>API: POST /sessions/{id}/stage5/quick-handoff {rank: N}
+
+        Note over SVC: quick_handoff（session_service.py:822）
+        SVC->>G: aget_state
+        SVC->>SVC: _record_bu_option_choice<br/>label = 「先用 #N 試試 BRD」
+        SVC->>G: aupdate_state {history: history + [bu_trace]}
+        SVC->>Bus: publish bu_turn_recorded
+        Bus-->>FE: SSE bu_turn_recorded → BU 泡泡
+
+        SVC->>G: aupdate_state<br/>{selected_candidate=N,<br/> ready_to_handoff=True,<br/> stage_5_stuck_acked=True,<br/> pending_stage5_decision=False}
+        SVC->>G: ainvoke{} → entry_router 看 ready_to_handoff<br/>→ emit_dual_output（不 stream agent reply）
+        G->>G: 組 structured JSON + LLM 寫 paragraph
+        G->>Bus: publish handoff_ready
+        Bus-->>FE: SSE handoff_ready
+        FE->>FE: setHandoff{paragraph}<br/>setGeneratingHandofffalse
+        Note over FE: 跳 HandoffConfirmModal（見 S07）
+    end
+
+    Note over FE: reload 防呆：<br/>useQuery 看到 acked=True && pending=False<br/>→ SSE replay 的 stage5_stuck 被 skip

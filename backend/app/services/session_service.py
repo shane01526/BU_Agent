@@ -24,12 +24,19 @@ def _now_iso() -> str:
 async def create_session(
     db: Session, user: User, payload: SessionCreateRequest
 ) -> SessionRow:
+    from app.core.config import settings as _settings
+
+    chosen_model = (payload.llm_model or _settings.default_model or "").strip() or None
+    # 模型清單已改為動態從供應商抓,這裡不再硬擋白名單;
+    # llm.py 的 _resolve_backend 會在 prefix 不認識時 fallback 到 mock 並 warning。
+
     session = SessionRow(
         session_id=uuid.uuid4(),
         user_id=user.user_id,
         bu=payload.bu,
         sme_role=payload.sme_role,
         raw_hint=payload.raw_hint,
+        llm_model=chosen_model,
         mode="explore",
         stage=1,
         status="active",
@@ -62,6 +69,7 @@ async def run_turn(
             bu=session.bu,
             sme_role=session.sme_role,
             raw_hint=session.raw_hint,
+            llm_model=session.llm_model,
             mode="explore",
         )
         # 首次 invoke：graph 從 START 跑到 END，出第一題
@@ -74,12 +82,23 @@ async def run_turn(
         # history 已改 replace semantics → 必須傳完整新 list 進 update_state。
         if bu_text:
             turn_id = len(state.history) + 1
+            # Consult Step 2 時推 section_id;BU reply 對應「當下 pending 章節」
+            sec_id_for_trace: str | None = None
+            if state.mode == "consult_step2" and state.current_section_idx is not None:
+                idx_for_trace = state.current_section_idx
+                if 0 <= idx_for_trace < len(state.brd_outline):
+                    raw_sec = state.brd_outline[idx_for_trace]
+                    sec_id_for_trace = (
+                        getattr(raw_sec, "section_id", None)
+                        or (raw_sec.get("section_id") if isinstance(raw_sec, dict) else None)
+                    )
             bu_trace = TraceEntry(
                 turn_id=turn_id,
                 mode=state.mode,
                 role="bu",
                 raw_text=bu_text,
                 timestamp=_now_iso(),
+                section_id=sec_id_for_trace,
             )
             new_history = list(state.history) + [bu_trace]
             await graph.aupdate_state(config, {"history": new_history})
@@ -103,6 +122,18 @@ async def run_turn(
     final = await graph.aget_state(config)
     final_state = GraphState.model_validate(final.values)
 
+    # 兜底:無論本輪 graph 有沒有發 agent_reply_done(stage>=4 silent END、cold_exit、
+    # ai_necessity 警示等都不會發),都告訴前端「這輪結束了、可以再輸入」。
+    await bus.publish(
+        str(session.session_id),
+        "turn_done",
+        {
+            "mode": final_state.mode,
+            "stage": final_state.stage,
+            "history_len": len(final_state.history),
+        },
+    )
+
     # 同步 DB：mode / stage / status / exploration_outputs
     session.mode = final_state.mode
     session.stage = final_state.stage
@@ -124,10 +155,15 @@ async def run_turn(
 
 
 async def confirm_handoff(db: Session, session: SessionRow) -> GraphState:
-    """BU 在 modal 點「進入 Consult mode」：切 mode 並驅動 consult subgraph
-    跑 load_template → auto_fill_outline,讓前端立刻看到 BRD 大綱。"""
+    """BU 在 modal 點「進入 Consult mode」:切 mode、單輪 ainvoke 跑完整段。
+
+    v9:consult subgraph 已把 auto_fill_outline 直接連到 section_loop,
+    一個 super-step 內依序跑完 load_template → auto_fill_outline → section_loop,
+    第一章提問會在同一輪 publish。不再需要 v6/v7 的兩輪 ainvoke + 防禦寫入。
+    """
     graph = await get_graph()
     config = {"configurable": {"thread_id": str(session.session_id)}}
+
     await graph.aupdate_state(config, {"mode": "consult_step1"})
     session.mode = "consult_step1"
     db.commit()
@@ -137,14 +173,19 @@ async def confirm_handoff(db: Session, session: SessionRow) -> GraphState:
         {"from": "explore", "to": "consult_step1"},
     )
 
-    # 第 1 輪：route_mode → consult subgraph → load_template → auto_fill_outline
-    #         → publish outline_ready, mode 切 consult_step2
-    await graph.ainvoke({}, config=config)
-    # 第 2 輪：consult_step2 + 有 needs_round2 → section_loop publish 第一個提問
     await graph.ainvoke({}, config=config)
 
     snap = await graph.aget_state(config)
     final_state = GraphState.model_validate(snap.values)
+    log.info(
+        "confirm_handoff.done",
+        mode=final_state.mode,
+        outline_n=len(final_state.brd_outline),
+        current_section_idx=final_state.current_section_idx,
+        history_n=len(final_state.history),
+        pending_question_head=(final_state.pending_question or "")[:40],
+    )
+
     session.mode = final_state.mode
     db.commit()
     return final_state
@@ -204,7 +245,7 @@ async def _integrate_bu_answer_to_section(
 
     new_content = ""
     try:
-        llm = get_llm()
+        llm = get_llm(state.llm_model)
         async for chunk in llm.chat_stream(
             [{"role": "user", "content": user}]
         ):
@@ -357,12 +398,80 @@ async def section_action(
         {"section_id": section_id, "section": target.model_dump()},
     )
 
+    # Bug 2 修:讓前端 Strip / SectionInlineHeader 立刻跳到下一章
+    # (不必等 5-10s 後 LLM stream 完才跳)
+    if next_idx is not None and 0 <= next_idx < len(new_outline):
+        next_sec = new_outline[next_idx]
+        await bus.publish(
+            str(session.session_id),
+            "current_section_changed",
+            {"section_id": next_sec.section_id},
+        )
+
     # 推進 graph 一輪：若還有 needs_round2,section_loop 會問下一題;
     # 否則 quality_gate 走完 → 等 BU 點「送 BA」
     # ainvoke({}): 從 START 跑新 super-step（None 對 ended graph 是 noop）
     await graph.ainvoke({}, config=config)
 
     return target.model_dump()
+
+
+async def select_section(
+    db: Session, session: SessionRow, section_id: str
+) -> dict:
+    """BU 在 strip 上點選某章節 → 切 current_section_idx + 把該章 reset 成
+    needs_round2(若先前已 accepted/skipped/flagged) → 推進 graph 讓 section_loop
+    對該章重新提問。
+
+    無條件接受任何 section_id(不論 status):BU 想回頭重訪 accepted 章也允許。
+    placeholder 章節由 frontend 守門不送過來。
+    """
+    from app.graph.shared.state import SectionState
+
+    graph = await get_graph()
+    config = {"configurable": {"thread_id": str(session.session_id)}}
+    snap = await graph.aget_state(config)
+    state = GraphState.model_validate(snap.values)
+
+    outline = _normalize_section_list(state.brd_outline)
+    idx = next(
+        (i for i, s in enumerate(outline) if s.section_id == section_id),
+        None,
+    )
+    if idx is None:
+        raise KeyError(f"section {section_id} not found")
+
+    target = outline[idx]
+    if target.status == "placeholder":
+        raise ValueError("placeholder section cannot be selected")
+
+    # 如果章節已不是 needs_round2,把它 reset 為 needs_round2;
+    # 這是讓 consult subgraph entry 路由到 section_loop 的必要條件。
+    new_outline: list[SectionState] = list(outline)
+    if target.status != "needs_round2":
+        updated = target.model_copy(update={"status": "needs_round2"})
+        new_outline[idx] = updated
+        await bus.publish(
+            str(session.session_id),
+            "section_updated",
+            {"section_id": section_id, "section": updated.model_dump()},
+        )
+
+    await graph.aupdate_state(
+        config,
+        {"current_section_idx": idx, "brd_outline": new_outline},
+    )
+    # 對稱性:BU 主動切章時也廣播 current_section_changed,
+    # 讓 SectionInlineHeader 在 agent stream 開始前就同步顯示該章
+    await bus.publish(
+        str(session.session_id),
+        "current_section_changed",
+        {"section_id": section_id},
+    )
+    # ainvoke({}): 從 START 跑新 super-step → consult subgraph → section_loop
+    await graph.ainvoke({}, config=config)
+
+    return {"section_id": section_id, "current_section_idx": idx}
 
 
 async def submit_session(
@@ -408,40 +517,114 @@ async def submit_session(
     }
 
 
-async def acknowledge_ai_necessity_warning(
-    db: Session, session: SessionRow
-) -> GraphState:
-    """BU 點「我了解了/讓我繼續想想」:本 session 不再彈警示。"""
-    graph = await get_graph()
-    config = {"configurable": {"thread_id": str(session.session_id)}}
-    await graph.aupdate_state(config, {"ai_necessity_warned": True})
-    snap = await graph.aget_state(config)
-    return GraphState.model_validate(snap.values)
+# ---- AI necessity modal helpers ----
 
 
-async def override_ai_necessity_warning(
-    db: Session, session: SessionRow
-) -> GraphState:
-    """BU 點「還是想試試 AI」:標 bu_overrode、本 session 不再彈、繼續對話。"""
-    graph = await get_graph()
-    config = {"configurable": {"thread_id": str(session.session_id)}}
-    await graph.aupdate_state(
-        config,
-        {
-            "ai_necessity_warned": True,
-            "bu_overrode_ai_necessity": True,
-        },
+def _find_top1_candidate(state: GraphState) -> dict | None:
+    """從 scored_candidates 拿 rank=1 的 dict;沒有則回 None。"""
+    for c in state.scored_candidates:
+        d = c.model_dump() if hasattr(c, "model_dump") else c
+        if d.get("rank") == 1:
+            return d
+    return None
+
+
+def _recent_pain_signals(state: GraphState, limit: int = 5) -> list[dict]:
+    out = []
+    for p in state.pain_signals[-limit:]:
+        d = p.model_dump() if hasattr(p, "model_dump") else p
+        out.append({"raw_text": d.get("raw_text", "")})
+    return out
+
+
+def _last_bu_text(state: GraphState) -> str:
+    for h in reversed(list(state.history)):
+        role = getattr(h, "role", None) or (h.get("role") if isinstance(h, dict) else None)
+        if role == "bu":
+            return getattr(h, "raw_text", None) or h.get("raw_text", "")
+    return ""
+
+
+async def _record_bu_option_choice(
+    graph, config: dict, state: GraphState, label: str
+) -> tuple[int, GraphState]:
+    """寫一則 role='bu' 的 TraceEntry(內容是 modal 選項標籤),
+    publish bu_turn_recorded,回傳 (新 turn_id, 已 reload 的 state)。
+
+    Replace semantics:必須讀完整 history、append、整個寫回。
+    """
+    bu_turn_id = len(state.history) + 1
+    bu_trace = TraceEntry(
+        turn_id=bu_turn_id,
+        mode=state.mode,
+        role="bu",
+        raw_text=label,
+        timestamp=_now_iso(),
+    )
+    new_history = list(state.history) + [bu_trace]
+    await graph.aupdate_state(config, {"history": new_history})
+    await bus.publish(
+        str(state.session_id),
+        "bu_turn_recorded",
+        {"turn_id": bu_turn_id, "text": label},
     )
     snap = await graph.aget_state(config)
-    return GraphState.model_validate(snap.values)
+    return bu_turn_id, GraphState.model_validate(snap.values)
 
 
-async def explain_solution_class(
-    db: Session, session: SessionRow
-) -> GraphState:
-    """BU 點「想了解 [solution_class] 跟 AI 的差別」:
-    在對話區用 LLM 產一段白話說明,作為 agent 的下一個 turn。"""
+async def _stream_agent_reply(
+    session_id: str,
+    turn_id: int,
+    llm_model: str | None,
+    prompt_text: str,
+    fallback_text: str,
+) -> str:
+    """Stream LLM 回覆,publish agent_reply_delta(N×) + agent_reply_done。
+    LLM 失敗時用 fallback_text 維持 UI 不卡死。回傳 full text。"""
     from app.graph.shared.llm import get_llm
+
+    full = ""
+    try:
+        llm = get_llm(llm_model)
+        async for chunk in llm.chat_stream(
+            [{"role": "user", "content": prompt_text}]
+        ):
+            full += chunk
+            await bus.publish(
+                session_id,
+                "agent_reply_delta",
+                {"turn_id": turn_id, "text_delta": chunk},
+            )
+        full = full.strip()
+    except Exception as e:
+        log.warning("stream_agent_reply.llm_failed", error=str(e))
+        full = fallback_text
+        await bus.publish(
+            session_id,
+            "agent_reply_delta",
+            {"turn_id": turn_id, "text_delta": full},
+        )
+
+    await bus.publish(
+        session_id,
+        "agent_reply_done",
+        {"turn_id": turn_id, "full_text": full},
+    )
+    return full
+
+
+async def _run_ai_necessity_decision(
+    session: SessionRow,
+    bu_label: str,
+    prompt_name: str,
+    fallback_text: str,
+    extra_state_patch: dict | None = None,
+) -> GraphState:
+    """三個 modal endpoint(acknowledge / override / explain)的共用主流程:
+    1. 寫 BU 選項標籤 trace + 發 bu_turn_recorded
+    2. render prompt + stream agent reply
+    3. 寫 agent trace + clear pending flag + 套用 extra_state_patch
+    """
     from app.graph.shared.prompts import render
 
     graph = await get_graph()
@@ -449,84 +632,189 @@ async def explain_solution_class(
     snap = await graph.aget_state(config)
     state = GraphState.model_validate(snap.values)
 
-    # 找 top 1 candidate
-    top = None
-    for c in state.scored_candidates:
-        d = c.model_dump() if hasattr(c, "model_dump") else c
-        if d.get("rank") == 1:
-            top = d
-            break
+    top = _find_top1_candidate(state)
     if top is None:
-        return state
+        # 沒候選時直接 clear flag,避免 BU 卡在 modal 後狀態無法解
+        await graph.aupdate_state(
+            config,
+            {
+                "ai_necessity_warned": True,
+                "pending_ai_necessity_decision": False,
+                **(extra_state_patch or {}),
+            },
+        )
+        snap = await graph.aget_state(config)
+        return GraphState.model_validate(snap.values)
 
-    user = render(
-        "explain_solution_class",
+    # 1. BU 選項標籤
+    bu_turn_id, state = await _record_bu_option_choice(graph, config, state, bu_label)
+
+    # 2. render prompt with current dialog context
+    prompt_text = render(
+        prompt_name,
         bu=state.bu,
         sme_role=state.sme_role,
         solution_class=top.get("solution_class") or "rpa",
         rationale=top.get("solution_rationale") or "",
         direction=top.get("direction") or "",
         process_target=top.get("process_target") or "",
+        last_bu_text=_last_bu_text(state),
+        recent_pain_signals=_recent_pain_signals(state),
     )
 
-    turn_id = len(state.history) + 1
-
-    # Stream 給對話區
-    full = ""
-    try:
-        llm = get_llm()
-        async for chunk in llm.chat_stream(
-            [{"role": "user", "content": user}]
-        ):
-            full += chunk
-            await bus.publish(
-                str(session.session_id),
-                "agent_reply_delta",
-                {"turn_id": turn_id, "text_delta": chunk},
-            )
-        full = full.strip()
-    except Exception as e:
-        log.warning("explain_solution_class.llm_failed", error=str(e))
-        full = f"關於 {top.get('solution_class')} 跟 AI 的差別,LLM 暫時無法產生說明,請稍後重試或直接諮詢 BA。"
-        await bus.publish(
-            str(session.session_id),
-            "agent_reply_delta",
-            {"turn_id": turn_id, "text_delta": full},
-        )
-
-    await bus.publish(
+    # 3. stream agent reply
+    agent_turn_id = bu_turn_id + 1
+    agent_text = await _stream_agent_reply(
         str(session.session_id),
-        "agent_reply_done",
-        {"turn_id": turn_id, "full_text": full},
+        agent_turn_id,
+        state.llm_model,
+        prompt_text,
+        fallback_text=fallback_text,
     )
 
-    # 寫進 history(replace semantics)
-    new_trace = TraceEntry(
-        turn_id=turn_id,
+    # 4. write agent trace + clear flag
+    agent_trace = TraceEntry(
+        turn_id=agent_turn_id,
         mode=state.mode,
         role="agent",
-        raw_text=full,
+        raw_text=agent_text,
         timestamp=_now_iso(),
     )
-    new_history = list(state.history) + [new_trace]
-    await graph.aupdate_state(
-        config,
-        {
-            "history": new_history,
-            "ai_necessity_warned": True,
-        },
-    )
+    new_history = list(state.history) + [agent_trace]
+    patch: dict = {
+        "history": new_history,
+        "ai_necessity_warned": True,
+        "pending_ai_necessity_decision": False,
+    }
+    if extra_state_patch:
+        patch.update(extra_state_patch)
+    await graph.aupdate_state(config, patch)
 
     snap = await graph.aget_state(config)
     return GraphState.model_validate(snap.values)
 
 
-async def dismiss_stage5_stuck(db: Session, session: SessionRow) -> GraphState:
-    """BU 在 stage 5 卡關 modal 點「再聊一下」:
-    本 session 不再彈,讓 agent 換個切角繼續對話。"""
+async def acknowledge_ai_necessity_warning(
+    db: Session, session: SessionRow
+) -> GraphState:
+    """BU 點「我了解了,讓我繼續想想」:寫 BU 標籤 + agent 帶脈絡承接 + clear pending。"""
+    return await _run_ai_necessity_decision(
+        session,
+        bu_label="我了解了，讓我繼續想想",
+        prompt_name="acknowledge_ai_necessity",
+        fallback_text=(
+            "好,那就先停下來想想。可以再描述多一點目前流程的細節,"
+            "或是有沒有什麼判斷上的灰色地帶讓你覺得這件事不那麼單純?"
+        ),
+    )
+
+
+async def override_ai_necessity_warning(
+    db: Session, session: SessionRow
+) -> GraphState:
+    """BU 點「我有理由,還是想用 AI 試試看」:寫 BU 標籤 + agent 承接 + 標 bu_overrode + clear pending。"""
+    return await _run_ai_necessity_decision(
+        session,
+        bu_label="我有理由，還是想用 AI 試試看",
+        prompt_name="override_ai_necessity",
+        fallback_text=(
+            "好,那我們就先朝這個方向繼續推進。"
+            "可以再補一句嗎——是因為現有規則處理不了某些案例,還是有別的原因讓你覺得 AI 比較適合?"
+            "這段我會帶進 BRD 給 BA 參考。"
+        ),
+        extra_state_patch={"bu_overrode_ai_necessity": True},
+    )
+
+
+async def explain_solution_class(
+    db: Session, session: SessionRow
+) -> GraphState:
+    """BU 點「想了解 [solution_class] 跟 AI 的差別」:
+    寫 BU 標籤 + agent 用 LLM 產白話比較 + clear pending。"""
+    # 取 top1 拼 BU label,需先 peek 一次 state
     graph = await get_graph()
     config = {"configurable": {"thread_id": str(session.session_id)}}
-    await graph.aupdate_state(config, {"stage_5_stuck_acked": True})
+    snap = await graph.aget_state(config)
+    state = GraphState.model_validate(snap.values)
+    top = _find_top1_candidate(state)
+    sc = (top.get("solution_class") if top else None) or "rpa"
+
+    return await _run_ai_necessity_decision(
+        session,
+        bu_label=f"想了解 {sc} 跟 AI 的差別",
+        prompt_name="explain_solution_class",
+        fallback_text=(
+            f"關於 {sc} 跟 AI 的差別,LLM 暫時無法產生說明,請稍後重試或直接諮詢 BA。"
+        ),
+    )
+
+
+async def dismiss_stage5_stuck(db: Session, session: SessionRow) -> GraphState:
+    """BU 在 stage 5 卡關 modal 點「再聊一下」:
+    寫 BU 標籤 + agent 用 LLM stream 一段帶脈絡的承接 + clear pending flag。
+
+    走跟 ai_necessity 三個 modal handler 同樣的三段式(record BU label →
+    stream agent → clear flag),共用 _record_bu_option_choice / _stream_agent_reply。
+    """
+    from app.graph.shared.prompts import render
+
+    graph = await get_graph()
+    config = {"configurable": {"thread_id": str(session.session_id)}}
+    snap = await graph.aget_state(config)
+    state = GraphState.model_validate(snap.values)
+
+    # top3 候選給 prompt 當素材(若沒有則空 list,prompt 容錯)
+    top3 = []
+    for c in state.scored_candidates[:3]:
+        top3.append(c.model_dump() if hasattr(c, "model_dump") else c)
+
+    # 1. 寫 BU 選項標籤 trace + 發 bu_turn_recorded
+    bu_label = "再聊一下，我想想"
+    bu_turn_id, state = await _record_bu_option_choice(graph, config, state, bu_label)
+
+    # 2. render prompt with current dialog context
+    prompt_text = render(
+        "stage5_keep_talking",
+        bu=state.bu,
+        sme_role=state.sme_role,
+        stage_5_rounds=state.stage_5_rounds,
+        top3_candidates=top3,
+        recent_pain_signals=_recent_pain_signals(state),
+        last_bu_text=_last_bu_text(state),
+    )
+
+    # 3. stream agent reply
+    agent_turn_id = bu_turn_id + 1
+    agent_text = await _stream_agent_reply(
+        str(session.session_id),
+        agent_turn_id,
+        state.llm_model,
+        prompt_text,
+        fallback_text=(
+            "能停下來重新評估比硬選更好。我們換個切角,"
+            "從你最在意的指標(例如負擔減量 / 準確率)重新評分這幾個候選看看,"
+            "你目前最想優先解決的是準確率還是負擔減量?"
+        ),
+    )
+
+    # 4. write agent trace + clear pending flag + 標 acked
+    agent_trace = TraceEntry(
+        turn_id=agent_turn_id,
+        mode=state.mode,
+        role="agent",
+        raw_text=agent_text,
+        timestamp=_now_iso(),
+    )
+    new_history = list(state.history) + [agent_trace]
+    await graph.aupdate_state(
+        config,
+        {
+            "history": new_history,
+            "stage_5_stuck_acked": True,
+            "pending_stage5_decision": False,
+        },
+    )
+
     snap = await graph.aget_state(config)
     return GraphState.model_validate(snap.values)
 
@@ -535,21 +823,28 @@ async def quick_handoff(
     db: Session, session: SessionRow, rank: int
 ) -> GraphState:
     """BU 在 stage 5 卡關 modal 點「先用 #N 試試 BRD」:
-    一鍵 select candidate + 觸發 emit_dual_output。
-
-    與 select_candidate 差別:這裡保證 stage=5、不管目前 ready 狀態都強制走完 handoff。
+    記 BU 標籤 trace(讓 history 完整) → patch select + handoff + clear flags →
+    ainvoke 觸發 emit_dual_output。**不 stream agent reply**,直接走 handoff 流程。
     """
     graph = await get_graph()
     config = {"configurable": {"thread_id": str(session.session_id)}}
+    snap = await graph.aget_state(config)
+    state = GraphState.model_validate(snap.values)
+
+    # 寫 BU 選項標籤 trace(history 完整;reload 後對話順序保留)
+    bu_label = f"先用 #{rank} 試試 BRD"
+    _, state = await _record_bu_option_choice(graph, config, state, bu_label)
+
     await graph.aupdate_state(
         config,
         {
             "selected_candidate": rank,
             "ready_to_handoff": True,
             "stage_5_stuck_acked": True,
+            "pending_stage5_decision": False,
         },
     )
-    # ainvoke({}): 從 START 跑新 super-step（None 對 ended graph 是 noop）
+    # ainvoke({}): 從 START 跑新 super-step,subgraph entry 看到 ready_to_handoff 直接走 emit_dual_output
     await graph.ainvoke({}, config=config)
     snap = await graph.aget_state(config)
     return GraphState.model_validate(snap.values)

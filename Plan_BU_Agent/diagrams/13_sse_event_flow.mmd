@@ -1,0 +1,108 @@
+%% ID: L1.4 | Title: SSE Event 全圖 | Last updated 2026-05-25
+%% 三欄：左 = Backend publisher / 中 = SSE bus / 右 = Frontend handler
+%% 對應檔：
+%%   - backend/app/api/v1/sse.py（SSE endpoint + ring buffer replay）
+%%   - backend/app/graph/shared/events.py（SessionBus, HISTORY_LIMIT=256）
+%%   - frontend/src/lib/sse.ts（KNOWN_EVENTS）
+%%   - frontend/src/app/sessions/[id]/page.tsx（switch case 約 line 88-245）
+flowchart LR
+    subgraph BE["Backend Publishers"]
+        direction TB
+        P_DiscLoop["discovery_loop<br/>nodes.py:124"]
+        P_AckGuide["acknowledge_and_guide<br/>nodes.py:491"]
+        P_EmitDual["emit_dual_output<br/>nodes.py:551"]
+        P_ExtSig["extract_signals<br/>nodes.py:188"]
+        P_Score["score_candidates<br/>nodes.py:311"]
+        P_Converge["converge_check<br/>nodes.py:431"]
+        P_AutoFill["auto_fill_outline<br/>consult/nodes.py:167"]
+        P_SecLoop["section_loop<br/>consult/nodes.py:314"]
+        P_QGate["quality_gate<br/>consult/nodes.py:510"]
+        P_Service[("session_service.py<br/>run_turn / confirm_handoff / reset_explore<br/>edit_section / section_action / select_section<br/>_record_bu_option_choice<br/>_stream_agent_reply<br/>_run_ai_necessity_decision")]
+    end
+
+    subgraph BUS["SSE Bus<br/>events.py:SessionBus"]
+        direction TB
+        Pub[("publish session_id,<br/>event_type, data<br/>+ ring buffer 256 events")]
+        Sub[("subscribe session_id,<br/>last_event_id<br/>→ replay + queue")]
+    end
+
+    subgraph EV["SSE Events (KNOWN_EVENTS sse.ts:18-37)"]
+        direction TB
+        E_BuTurn["bu_turn_recorded<br/>{turn_id, text}"]
+        E_AgentDelta["agent_reply_delta<br/>{turn_id, text_delta, section_id?}"]
+        E_AgentDone["agent_reply_done<br/>{turn_id, full_text, stage?, section_id?}"]
+        E_TurnDone["turn_done<br/>{mode, stage, history_len}"]
+        E_PainAdd["pain_signal_added<br/>{signal}"]
+        E_CandUpd["candidate_updated<br/>{candidates}"]
+        E_StageCh["stage_changed<br/>{stage}"]
+        E_AiWarn["ai_necessity_warning<br/>{solution_class, rationale,<br/>top_candidate, candidates}"]
+        E_S5Stuck["stage5_stuck<br/>{rounds, candidates}"]
+        E_ColdEx["cold_exit<br/>{reason}"]
+        E_Handoff["handoff_ready<br/>{paragraph, structured}"]
+        E_ModeCh["mode_changed<br/>{from, to, reason?}"]
+        E_OutRdy["outline_ready<br/>{sections}"]
+        E_SecUpd["section_updated<br/>{section_id, section}"]
+        E_CurSec["current_section_changed<br/>{section_id}"]
+        E_Conflict["conflict_detected<br/>{conflicts}"]
+        E_Deliv["deliverables_ready"]
+        E_Heart["heartbeat (每 25s)"]
+    end
+
+    subgraph FE["Frontend Handler<br/>page.tsx switch case 約 88-245"]
+        direction TB
+        H_Stream["streaming text 累加<br/>setAwaitingAgent false"]
+        H_LiveMsg["liveMessages append"]
+        H_TurnDone["setAwaitingAgent false<br/>兜底"]
+        H_Pain["livePains append"]
+        H_Cand["liveCandidates 更新"]
+        H_AiModal["setAiNecessityWarn payload<br/>cache-read guard：<br/>warned && !pending → SKIP"]
+        H_S5Modal["setStage5Stuck payload<br/>cache-read guard：<br/>acked && !pending → SKIP"]
+        H_Cold["refetch session"]
+        H_Handoff["setHandoff payload<br/>modeRef='explore' guard"]
+        H_Mode["refetch session"]
+        H_Outline["setLiveSections + 結束 generatingOutline"]
+        H_Section["update sections state"]
+        H_PendSec["setPendingSectionId"]
+        H_Conf["alert 顯示矛盾摘要"]
+        H_Done["router.push /done"]
+    end
+
+    P_DiscLoop --> Pub
+    P_AckGuide --> Pub
+    P_EmitDual --> Pub
+    P_ExtSig --> Pub
+    P_Score --> Pub
+    P_Converge --> Pub
+    P_AutoFill --> Pub
+    P_SecLoop --> Pub
+    P_QGate --> Pub
+    P_Service --> Pub
+
+    Pub --> E_BuTurn & E_AgentDelta & E_AgentDone & E_TurnDone & E_PainAdd & E_CandUpd & E_StageCh & E_AiWarn & E_S5Stuck & E_ColdEx & E_Handoff & E_ModeCh & E_OutRdy & E_SecUpd & E_CurSec & E_Conflict & E_Deliv & E_Heart
+    E_BuTurn & E_AgentDelta & E_AgentDone & E_TurnDone & E_PainAdd & E_CandUpd & E_StageCh & E_AiWarn & E_S5Stuck & E_ColdEx & E_Handoff & E_ModeCh & E_OutRdy & E_SecUpd & E_CurSec & E_Conflict & E_Deliv & E_Heart --> Sub
+
+    Sub --> H_Stream & H_LiveMsg & H_TurnDone & H_Pain & H_Cand & H_AiModal & H_S5Modal & H_Cold & H_Handoff & H_Mode & H_Outline & H_Section & H_PendSec & H_Conf & H_Done
+
+    E_BuTurn --> H_LiveMsg
+    E_AgentDelta --> H_Stream
+    E_AgentDone --> H_LiveMsg
+    E_TurnDone --> H_TurnDone
+    E_PainAdd --> H_Pain
+    E_CandUpd --> H_Cand
+    E_AiWarn --> H_AiModal
+    E_S5Stuck --> H_S5Modal
+    E_ColdEx --> H_Cold
+    E_Handoff --> H_Handoff
+    E_ModeCh --> H_Mode
+    E_OutRdy --> H_Outline
+    E_SecUpd --> H_Section
+    E_CurSec --> H_PendSec
+    E_Conflict --> H_Conf
+    E_Deliv --> H_Done
+
+    classDef sse fill:#d1fae5,stroke:#047857,color:#064e3b
+    classDef defer fill:#fef3c7,stroke:#b45309,color:#78350f
+    classDef cold fill:#fee2e2,stroke:#991b1b,color:#7f1d1d
+    class E_BuTurn,E_AgentDelta,E_AgentDone,E_TurnDone,E_PainAdd,E_CandUpd,E_StageCh,E_Handoff,E_ModeCh,E_OutRdy,E_SecUpd,E_CurSec,E_Conflict,E_Deliv,E_Heart sse
+    class E_AiWarn,E_S5Stuck defer
+    class E_ColdEx cold

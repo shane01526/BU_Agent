@@ -63,6 +63,64 @@ def _recent(state: GraphState, limit: int = RECENT_HISTORY_LIMIT) -> list[dict]:
     ]
 
 
+DISSATISFIED_KEYWORDS = (
+    # 核心否定
+    "不太對", "不對", "都不是", "沒一個對",
+    # 軟否定
+    "不喜歡", "感覺不準", "不甚適合", "不適合",
+    # 認另選
+    "再來幾個", "想試別的", "想試試別的", "還有別的", "還有别的",
+    "換一個", "換個", "其他",
+    # 評論不足
+    "太表面", "不夠具體", "別的面向", "别的面向",
+)
+
+ACK_GUIDE_MARKER = "整理在右側"
+
+
+def _bu_mentions_any_candidate(text: str, candidates) -> bool:
+    if not candidates:
+        return False
+    if any(tok in text for tok in ("#1", "#2", "#3", "第一", "第二", "第三")):
+        return True
+    for c in candidates:
+        d = c.model_dump() if hasattr(c, "model_dump") else c
+        direction = d.get("direction") or ""
+        head = direction[:6]
+        if head and head in text:
+            return True
+    return False
+
+
+def needs_divergent_question(state: GraphState) -> bool:
+    """stage>=4 後路由分流:
+    True  → discovery_loop(換切角發散)
+    False → acknowledge_and_guide(承接 + 引導選擇)
+
+    觸發條件:
+      A. BU 訊息含 DISSATISFIED_KEYWORDS
+      B. agent 上一輪已是 acknowledge_and_guide(結尾含 ACK_GUIDE_MARKER)
+         且 BU 這輪沒選卡片、訊息也沒提到任何候選
+    """
+    history = _history(state)
+    last_bu = next((h for h in reversed(history) if h.role == "bu"), None)
+    if last_bu is None:
+        return False
+    text = last_bu.raw_text
+
+    if any(k in text for k in DISSATISFIED_KEYWORDS):
+        return True
+
+    last_agent = next((h for h in reversed(history) if h.role == "agent"), None)
+    if last_agent and ACK_GUIDE_MARKER in last_agent.raw_text:
+        if state.selected_candidate is None and not _bu_mentions_any_candidate(
+            text, state.scored_candidates
+        ):
+            return True
+
+    return False
+
+
 async def discovery_loop(state: GraphState) -> dict:
     """用 prompt 產下一題,streaming 推 SSE。"""
     bank = load_bank()
@@ -86,7 +144,7 @@ async def discovery_loop(state: GraphState) -> dict:
         seeds=stage_def.seeds,
     )
 
-    llm = get_llm()
+    llm = get_llm(state.llm_model)
     history = _history(state)
     turn_id = len(history) + 1
 
@@ -142,7 +200,7 @@ async def extract_signals(state: GraphState) -> dict:
                     for c in state.scored_candidates],
     )
 
-    llm = get_llm()
+    llm = get_llm(state.llm_model)
     try:
         result = await llm.chat_structured(
             [{"role": "user", "content": user}], PainSignalListOutput
@@ -187,7 +245,11 @@ async def extract_signals(state: GraphState) -> dict:
 
 
 def _heuristic_candidates_fallback(state: GraphState) -> list[CandidateDirection]:
-    """LLM 失敗時的 fallback：依 BU 別回固定候選,讓 UI 不會空白。"""
+    """**僅 cold-start 用**:LLM 在第一輪就失敗、又無上輪候選時退回的固定 preset。
+
+    一般情況下(已有上輪 scored_candidates)LLM 失敗時 score_candidates
+    會走「保留上輪」分支,不再呼叫此 fallback。
+    """
     bu = state.bu
     presets: dict[str, list[CandidateDirection]] = {
         "產險": [
@@ -247,18 +309,24 @@ async def cluster_pain_points(state: GraphState) -> dict:
 
 
 async def score_candidates(state: GraphState) -> dict:
-    """用 LLM 把 pain signals 聚類 + 5 維評分。失敗時退回 heuristic preset。"""
-    # 沒有任何 pain signal → 不產候選
+    """用 LLM 把 pain signals 聚類 + 5 維評分。
+
+    LLM 失敗策略(避免「override 後突變成不相關 preset」):
+    - 失敗 + 已有上一輪 scored_candidates → 保留上輪不更新(只 republish 給新訂閱者)
+    - 失敗 + 從未有 scored_candidates(冷啟首輪)→ 才套 _heuristic_candidates_fallback
+    """
+    # 既存候選(用於 republish 與保留判斷),統一 normalize 成 CandidateDirection
+    existing = [
+        c if isinstance(c, CandidateDirection) else CandidateDirection.model_validate(c)
+        for c in state.scored_candidates
+    ]
+
+    # 沒任何 pain signal → 不產新候選;但若已有舊候選 republish 給新訂閱者
     pains = [
         p if isinstance(p, PainSignal) else PainSignal.model_validate(p)
         for p in state.pain_signals
     ]
     if not pains:
-        # 但若已有舊 candidates，仍要 republish 給新訂閱者
-        existing = [
-            c if isinstance(c, CandidateDirection) else CandidateDirection.model_validate(c)
-            for c in state.scored_candidates
-        ]
         if existing:
             await bus.publish(
                 state.session_id,
@@ -276,8 +344,9 @@ async def score_candidates(state: GraphState) -> dict:
         kc=kc,
     )
 
-    llm = get_llm()
+    llm = get_llm(state.llm_model)
     scored: list[CandidateDirection] = []
+    llm_ok = False
     try:
         result = await llm.chat_structured(
             [{"role": "user", "content": user}], CandidateListOutput
@@ -296,10 +365,27 @@ async def score_candidates(state: GraphState) -> dict:
                     solution_rationale=d.solution_rationale,
                 )
             )
+        llm_ok = bool(scored)
     except Exception as e:
         log.warning("score_candidates.llm_failed", error=str(e))
 
-    if not scored:
+    # LLM 失敗(或回空) + 已有上一輪 candidates → 保留不變,避免畫面突然變 preset
+    if not llm_ok and existing:
+        log.info(
+            "score_candidates.keep_previous",
+            n_existing=len(existing),
+            reason="llm_failed_or_empty_with_prior",
+        )
+        await bus.publish(
+            state.session_id,
+            "candidate_updated",
+            {"candidates": [c.model_dump() for c in existing]},
+        )
+        # 不累加 streak、不重發 warning、不改 state
+        return {}
+
+    # LLM 失敗 + 從未有候選(冷啟首輪)→ 套 preset 確保 UI 不空白
+    if not llm_ok:
         scored = _heuristic_candidates_fallback(state)
 
     await bus.publish(
@@ -331,6 +417,13 @@ async def score_candidates(state: GraphState) -> dict:
                 "candidates": [c.model_dump() for c in scored[:3]],
             },
         )
+        # 立即標記已警示,避免 BU 還沒按 modal 又連續送訊息時 streak 累加再次觸發 publish
+        # (BU 之後按 modal 三選一 service 仍會冗餘設 True,無害)
+        patch["ai_necessity_warned"] = True
+        # 鎖住本 super-step,after_converge 看到此 flag 會直接 END,
+        # 避免 graph 繼續走 acknowledge_and_guide / discovery_loop 搶話。
+        # 三個 modal endpoint(acknowledge/override/explain)的 service 會 clear 此 flag。
+        patch["pending_ai_necessity_decision"] = True
 
     return patch
 
@@ -385,10 +478,74 @@ async def converge_check(state: GraphState) -> dict:
                     "candidates": top_candidates,
                 },
             )
+            # 鎖住本 super-step;after_converge 看到此 flag 直接 END,
+            # 避免 graph 繼續走 discovery_loop / acknowledge_and_guide 搶話。
+            # dismiss_stage5_stuck / quick_handoff service 會 clear 此 flag。
+            patch["pending_stage5_decision"] = True
 
     if ready:
         patch["ready_to_handoff"] = True
     return patch
+
+
+async def acknowledge_and_guide(state: GraphState) -> dict:
+    """v8: stage>=4 + 已有候選時走這條,回應 BU 上一句並引導去看右側候選卡。
+
+    不問新探索性問題(那是 v7 要修的 UX 問題:候選卡剛冒出來就被新提問蓋過)。
+    短回應確保 chat 不會在 AI necessity modal 彈完之後卡死、看起來像 agent 不回。
+    """
+    history = _history(state)
+    last_bu = next((h for h in reversed(history) if h.role == "bu"), None)
+    if last_bu is None:
+        return {}
+
+    user = render(
+        "acknowledge_and_guide",
+        last_bu_text=last_bu.raw_text,
+        candidates=[
+            c.model_dump() if hasattr(c, "model_dump") else c
+            for c in state.scored_candidates
+        ],
+    )
+    turn_id = len(history) + 1
+    full = ""
+    try:
+        llm = get_llm(state.llm_model)
+        async for chunk in llm.chat_stream(
+            [{"role": "user", "content": user}]
+        ):
+            full += chunk
+            await bus.publish(
+                state.session_id,
+                "agent_reply_delta",
+                {"turn_id": turn_id, "text_delta": chunk},
+            )
+        full = full.strip()
+    except Exception as e:
+        log.warning("acknowledge_and_guide.llm_failed", error=str(e))
+
+    if not full:
+        full = "了解,我把幾個可能方向整理在右側,你覺得哪一個最貼近你想推進的?"
+        await bus.publish(
+            state.session_id,
+            "agent_reply_delta",
+            {"turn_id": turn_id, "text_delta": full},
+        )
+
+    await bus.publish(
+        state.session_id,
+        "agent_reply_done",
+        {"turn_id": turn_id, "full_text": full, "stage": state.stage},
+    )
+
+    trace = TraceEntry(
+        turn_id=turn_id,
+        mode="explore",
+        role="agent",
+        raw_text=full,
+        timestamp=_now_iso(),
+    )
+    return {"pending_question": full, "history": history + [trace]}
 
 
 async def emit_dual_output(state: GraphState) -> dict:
@@ -439,7 +596,7 @@ async def emit_dual_output(state: GraphState) -> dict:
     )
     paragraph = ""
     try:
-        llm = get_llm()
+        llm = get_llm(state.llm_model)
         async for chunk in llm.chat_stream(
             [{"role": "user", "content": user}]
         ):
