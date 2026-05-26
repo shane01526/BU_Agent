@@ -11,6 +11,8 @@ WORKDIR /app
 RUN corepack enable && corepack prepare pnpm@10.11.0 --activate
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
+ARG BACKEND_INTERNAL_URL=http://backend:8000
+ENV BACKEND_INTERNAL_URL=${BACKEND_INTERNAL_URL}
 ENV NEXT_TELEMETRY_DISABLED=1
 RUN pnpm build
 
