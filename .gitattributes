@@ -1,0 +1,27 @@
+# 強制所有文字檔在 repo 內用 LF。Windows checkout 時 working tree 會看到 CRLF
+# (因 core.autocrlf=true)，但 push / commit 進 repo 都是 LF。
+# 這樣 EC2 (Linux) 上跑 entrypoint.sh 不會因為 CRLF 直接 ENOENT。
+* text=auto eol=lf
+
+# 明確列關鍵類型，避免 binary detect 誤判
+*.sh   text eol=lf
+*.py   text eol=lf
+*.ts   text eol=lf
+*.tsx  text eol=lf
+*.js   text eol=lf
+*.mjs  text eol=lf
+*.json text eol=lf
+*.yml  text eol=lf
+*.yaml text eol=lf
+*.md   text eol=lf
+*.j2   text eol=lf
+*.toml text eol=lf
+*.sql  text eol=lf
+
+# 已知 binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.pdf binary

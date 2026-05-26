@@ -9,11 +9,15 @@ export type SseEvent = {
 };
 
 // 瀏覽器直連 backend，跳過 Next.js dev proxy 的 event-stream buffer
-const BROWSER_API_BASE =
-  typeof window !== 'undefined'
-    ? (process.env.NEXT_PUBLIC_API_BASE_BROWSER as string | undefined) ||
-      'http://localhost:8000'
-    : '';
+// Runtime resolution：build-time env 不知道 EC2 IP，用 window.location.hostname 推
+function resolveBrowserApiBase(): string {
+  const fromEnv = process.env.NEXT_PUBLIC_API_BASE_BROWSER;
+  if (fromEnv) return fromEnv;
+  if (typeof window !== 'undefined') {
+    return `${window.location.protocol}//${window.location.hostname}:8000`;
+  }
+  return '';
+}
 
 const KNOWN_EVENTS = [
   'agent_reply_delta',
@@ -64,7 +68,7 @@ export function useSessionEvents(
     let entry = _activeStreams.get(sessionId);
     if (!entry) {
       const userId = getCookieUserId();
-      const url = `${BROWSER_API_BASE}/api/v1/sessions/${sessionId}/events${
+      const url = `${resolveBrowserApiBase()}/api/v1/sessions/${sessionId}/events${
         userId ? `?user_id=${encodeURIComponent(userId)}` : ''
       }`;
       const es = new EventSource(url, { withCredentials: false });

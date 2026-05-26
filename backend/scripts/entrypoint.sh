@@ -36,4 +36,10 @@ with SessionLocal() as db:
 print("seeded users OK")
 PY
 
-exec uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+# 只在 APP_ENV=local 時掛 --reload（dev 用）；prod / EC2 都不掛，避免容器內檔案
+# 變動觸發 reload 而把 LangGraph PostgresSaver session 連線打斷。
+if [ "${APP_ENV:-prod}" = "local" ]; then
+  exec uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+else
+  exec uvicorn app.main:app --host 0.0.0.0 --port 8000
+fi

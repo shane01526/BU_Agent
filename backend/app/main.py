@@ -31,10 +31,14 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="BU Agent API", version="0.1.0", lifespan=lifespan)
 
+# CORS：REST 走 Next.js same-origin proxy 不會用到 CORS；只有 SSE EventSource 與
+# /api/v1/models 的 health 探測會跨網域。allow_origins=["*"] 時 spec 禁止 credentials,
+# 自動關掉。
+_origins = settings.cors_origin_list
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=settings.cors_origin_list,
-    allow_credentials=True,
+    allow_origins=_origins,
+    allow_credentials=_origins != ["*"],
     allow_methods=["*"],
     allow_headers=["*"],
 )

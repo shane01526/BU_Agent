@@ -128,7 +128,64 @@ docker compose up --build
 docker compose exec backend bash -lc 'echo "OPENAI head=${OPENAI_API_KEY:0:11}; LLM_MODE=$LLM_MODE"'
 ```
 
-### 6. End-to-end smoke（Explore mode）
+### 6. 上 AWS EC2 部署（PoC：直接用 IP + port）
+
+預期：把整個 `BU_Agent/` 丟進 EC2 → 填 LLM key → `docker compose up`，瀏覽器開 `http://<ec2-public-ip>:3000` 即可。前端 SSE 在 runtime 從 `window.location.hostname` 自動推 backend URL，不需 build-time 知道 EC2 IP。
+
+**步驟**
+
+```bash
+# 1. 把整包送上 EC2（rsync 比 scp 快；或乾脆 git clone）
+rsync -avz --exclude .git --exclude node_modules --exclude .next --exclude .venv \
+  ./ ec2-user@<ec2-public-ip>:~/BU_Agent/
+
+# 2. SSH 進去
+ssh ec2-user@<ec2-public-ip>
+cd BU_Agent
+
+# 3. 準備 .env（填 LLM API key）
+cp .env.example .env
+vim .env   # 至少填 OPENAI_API_KEY 或 GEMINI_API_KEY
+
+# 4. 全套起來
+docker compose up --build -d
+docker compose ps    # postgres healthy + backend Up + frontend Up
+```
+
+開瀏覽器：`http://<ec2-public-ip>:3000` → 登入 `dev-bu-001（產險 SME）` → 開新諮詢。
+
+**EC2 必備設定**
+
+| 項目 | 設定 |
+| --- | --- |
+| Instance | `t3.medium`（4GB RAM）以上；`t3.small` 跑得動但會吃緊 |
+| Disk | 20GB+（pgdata + docker images） |
+| Security Group inbound | TCP **3000**（前端，使用者瀏覽器） + **8000**（後端，瀏覽器 SSE 直連） + **22**（SSH） |
+| Outbound | 預設 all |
+| Elastic IP | 強烈建議（不然重啟 EC2 後 IP 會變、網址跟著改） |
+| Docker | 必須安裝 docker + docker compose plugin（Amazon Linux 2023 預設已有） |
+
+**Docker daemon 預設不會開機自啟；EC2 重啟後**：
+
+```bash
+sudo systemctl enable --now docker
+```
+
+`docker-compose.yml` 三個 service 都有 `restart: unless-stopped`，docker daemon 起來後 container 會自動恢復。
+
+**Troubleshoot**
+
+| 症狀 | 解法 |
+| --- | --- |
+| 瀏覽器開頁面 OK 但對話沒回覆、Network tab 看 `:8000/events` 連不上 | Security Group 沒開 8000；SSE 是瀏覽器**直連** backend，不走 Next.js proxy |
+| `docker compose up` 卡在 frontend build | EC2 RAM 不夠（Next build 吃 ~1.5GB），升級 instance 或加 swap |
+| `:8000/health` 401 Incorrect API key | host shell env 蓋過 `.env`：`docker compose exec backend bash -lc 'echo ${OPENAI_API_KEY:0:11}'` 比對 |
+
+**回到本機 dev**：把 `.env` 的 `APP_ENV=prod` 改 `local`，並改用 host-side `pnpm dev` / `uvicorn ... --reload` 而非 docker-compose（image 是 prod build，不適合 hot reload）。
+
+---
+
+### 7. End-to-end smoke（Explore mode）
 
 1. 瀏覽器開 <http://localhost:3000> → 自動導到 `/login`
 2. 選 `Dev BU 001（產險 SME）` → 進入

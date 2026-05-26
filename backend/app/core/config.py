@@ -42,7 +42,9 @@ class Settings(BaseSettings):
     oidc_client_secret: str = ""
     oidc_redirect_uri: str = "http://localhost:3000/auth/callback"
 
-    cors_origins: str = "http://localhost:3000"
+    # PoC：REST 走 same-origin Next.js proxy 不會用到 CORS；SSE 用 EventSource
+    # 不帶 cookie，配 "*" 對 IP 部署夠安全。上 SSO / domain 時收緊到實際 origin。
+    cors_origins: str = "*"
 
     @property
     def cors_origin_list(self) -> list[str]:

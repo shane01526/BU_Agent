@@ -15,6 +15,7 @@ services:
       interval: 5s
       timeout: 3s
       retries: 10
+    restart: unless-stopped
 
   backend:
     build:
@@ -28,16 +29,14 @@ services:
     environment:
       DATABASE_URL: postgresql+psycopg://bu_agent:bu_agent@postgres:5432/bu_agent
       LANGGRAPH_CHECKPOINT_URL: postgresql://bu_agent:bu_agent@postgres:5432/bu_agent
-      APP_ENV: local
-      CORS_ORIGINS: http://localhost:3000
+      APP_ENV: ${APP_ENV:-prod}
     ports:
       - "8000:8000"
     depends_on:
       postgres:
         condition: service_healthy
-    volumes:
-      - ./backend:/app
     command: ["bash", "/app/scripts/entrypoint.sh"]
+    restart: unless-stopped
 
   frontend:
     build:
@@ -45,10 +44,9 @@ services:
       dockerfile: Dockerfile
     container_name: bu_agent_frontend
     environment:
-      # 瀏覽器走同源 /api 經 Next.js rewrites 代理，不直接打後端
+      # 瀏覽器走同源 /api 經 Next.js rewrites 代理；
+      # SSE 在 sse.ts 中 runtime 從 window.location.hostname 推 backend，無需 build-time env
       NEXT_PUBLIC_API_BASE: ""
-      # SSE 例外：瀏覽器直連 backend (host:8000)，避開 Next dev proxy 的 event-stream buffer
-      NEXT_PUBLIC_API_BASE_BROWSER: http://localhost:8000
       # Next.js server-side proxy 在 container 內連 backend service name
       BACKEND_INTERNAL_URL: http://backend:8000
       NEXT_PUBLIC_AUTH_MODE: mock
@@ -56,11 +54,7 @@ services:
       - "3000:3000"
     depends_on:
       - backend
-    volumes:
-      - ./frontend:/app
-      - /app/node_modules
-      - /app/.next
-    command: ["pnpm", "dev"]
+    restart: unless-stopped
 
 volumes:
   pgdata:
