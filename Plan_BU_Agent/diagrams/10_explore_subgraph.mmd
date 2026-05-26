@@ -14,7 +14,7 @@ flowchart TD
     Score -- "top1 ai_necessity=low<br/>連續≥2 輪 + 未 warned" --> AiWarn[/"publish ai_necessity_warning<br/>+ patch:<br/>ai_necessity_warned=True<br/>pending_ai_necessity_decision=True"/]
     AiWarn --> Converge
 
-    Score --> Converge["converge_check<br/>nodes.py:431<br/>stage 遞進 1→5<br/>cold / stuck 偵測"]
+    Score --> Converge["converge_check<br/>nodes.py:431<br/>stage 遞進 1→5<br/>publish stage_changed（每次 stage 遞進）<br/>cold / stuck 偵測"]
 
     Converge -- "stage=5 + selected_candidate=None<br/>+ stage_5_rounds≥3<br/>+ 未 acked" --> S5Stuck[/"publish stage5_stuck<br/>+ patch:<br/>pending_stage5_decision=True"/]
     S5Stuck --> AfterC

@@ -23,7 +23,7 @@ sequenceDiagram
     SVC->>G: ainvoke{}
     G->>G: entry_router 看 mode='submit'<br/>→ build_deliverables（consult/nodes.py:552）
     G->>G: 組 BRD markdown（從 outline 拼）<br/>+ summary.json（trace + selected candidate +<br/> ai_necessity_triage 等）<br/>+ flag_for_ba_review（flagged 章節清單）
-    Note over G: 推測會 publish deliverables_ready<br/>(目前 code 中由 mode 切 done 帶動)
+    G->>Bus: publish deliverables_ready<br/>(consult/nodes.py:596)
 
     G-->>SVC: state（含 brd_doc_ref / summary_json）
 

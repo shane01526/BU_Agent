@@ -28,7 +28,7 @@ BU Agent 是「BU 端 BRD 草擬助手」：
 | L1.1 | `10_explore_subgraph.mmd` | Explore Subgraph | 7 個節點 + 7 分支 after_converge routing；ai_necessity / stage5_stuck / cold 三條岔出 |
 | L1.2 | `11_consult_subgraph.mmd` | Consult Subgraph | load_template → auto_fill_outline → section_loop → quality_gate → build_deliverables；entry router 4 分支 |
 | L1.3 | `12_deferred_reply_pattern.mmd` | Deferred-Reply Pattern | `pending_*_decision` flag 的 state machine（Idle / AiPending / S5Pending / ReadyHandoff） |
-| L1.4 | `13_sse_event_flow.mmd` | SSE 事件全圖 | 18 個 event：backend publisher → SessionBus → frontend handler |
+| L1.4 | `13_sse_event_flow.mmd` | SSE 事件全圖 | 17 個 content event + heartbeat：backend publisher → SessionBus → frontend handler |
 | L1.5 | `14_llm_routing.mmd` | LLM 多後端路由 | 模型選單 → `_resolve_backend` → 三個 backend；旁掛 `models_catalog` 動態抓 |
 | L1.6 | `15_session_mode_states.mmd` | Session Mode 狀態機 | explore / cold / consult_step1 / consult_step2 / submit / done 之間的轉換條件 |
 
@@ -154,44 +154,44 @@ flowchart LR
 
 ---
 
-## 如何匯入 Miro
+## 如何渲染 / 匯入 Miro
 
-`Plan_BU_Agent/diagrams/` 下已產好兩種格式（同名）：
+`Plan_BU_Agent/diagrams/` 只追蹤 `.mmd` source（`.png` / `.svg` 已從 git 排除，避免每改一次圖就 commit 二進位）。要看圖或匯入 Miro 時自行渲染：
 
-- **`*.png`** — 2400px 寬白底 raster；拖進 Miro 直接顯示，無格式問題（推薦先用這個試水溫）
-- **`*.svg`** — 已後處理過、把 mermaid 預設的 `<foreignObject>` 全部轉成原生 SVG `<text>`。Miro / Inkscape / Affinity 等不支援 foreignObject 的環境都能正確顯示文字，且向量放大不模糊
+### 最快：mermaid.live
 
-**最快流程**：直接把 `Plan_BU_Agent/diagrams/*.svg`（或 `.png`）拖進 Miro 畫布即可。建議按 **L0 居中、L1.x 圍繞 L0、Sx 拉成下層 swim lane**；或一個 Miro frame 放一張圖。
+1. 開 <https://mermaid.live>
+2. 把要看的 `.mmd` 內容貼進左側
+3. 右上 **Actions → Download SVG / PNG**（圖簡單不需 Miro 用 SVG 即可）
 
-**為何要後處理 SVG**：mermaid-cli 預設會把所有 label 包在 `<foreignObject>` 內用 `<div><p>...</p></div>` 渲染（依賴瀏覽器排版）。Miro / 多數向量編輯器無法 render foreignObject，貼上去會看到「框框有了但文字不見」。我們的後處理腳本把 foreignObject 拆成原生 `<text>` + `<tspan>`，跨環境穩定。
+> ⚠️ mermaid.live 下載的 SVG 仍含 `<foreignObject>`。Miro / Inkscape / Affinity 等環境會看到「框框有但文字不見」。要在這些環境用，跑下方 Step 2 後處理。
 
-### 重新從 .mmd 產 SVG / PNG（mermaid-cli）
+### 本機批次：mermaid-cli + 後處理
 
 ```bash
-# 一次性安裝 mermaid-cli
+# 一次性安裝
 npm install -g @mermaid-js/mermaid-cli
 
-# 從 BU_Agent/ 根目錄執行：
+# 從 BU_Agent/ 根目錄
 # Step 1：批次 render 為 SVG（mermaid 預設輸出，含 foreignObject）
 for f in Plan_BU_Agent/diagrams/*.mmd; do
   mmdc -i "$f" -o "${f%.mmd}.svg"
 done
 
-# Step 2：後處理把 foreignObject → 原生 <text>
+# Step 2：後處理把 foreignObject → 原生 <text>（Miro / Inkscape / Affinity 可正確顯示）
 PYTHONIOENCODING=utf-8 python Plan_BU_Agent/diagrams/_svg_foreignobj_to_text.py
 
-# 同時想要 PNG（可選；2400px 寬白底，Miro 直接拖即可）：
+# 同時想要 PNG（2400px 寬白底）
 for f in Plan_BU_Agent/diagrams/*.mmd; do
   mmdc -i "$f" -o "${f%.mmd}.png" -w 2400 -b white
 done
 ```
 
-> ⚠️ Step 1 + Step 2 必須**先後**跑：先讓 mmdc 算好 layout（必須帶 foreignObject 才能算字寬），再用 Python script 把 foreignObject 拆成 `<text>`。直接用 `htmlLabels: false` 重 render 雖然可去掉部分 foreignObject，但 edge label 仍會殘留，不可靠。
+> Step 1 + Step 2 必須先後跑：先讓 mmdc 算好 layout（要帶 foreignObject 才能算字寬），再用 Python script 把 foreignObject 拆成 `<text>`。直接用 `htmlLabels: false` 雖然可去掉部分 foreignObject，但 edge label 仍會殘留，不可靠。
 
 ### 替代方案
 
 - **Miro Mermaid 外掛**：Miro toolbar 搜 「Mermaid Diagrams」plugin → 貼 `.mmd` → Insert。輕量但不能 in-place 編輯。
-- **mermaid.live**：https://mermaid.live 貼上 `.mmd` → Actions → Download SVG。但 download 出來的 SVG 仍含 foreignObject，丟進 Miro 還是會看到空白框，要走 Step 2 後處理。
 
 ---
 
@@ -222,6 +222,7 @@ done
 | `turn_done` | run_turn 結尾無條件 | 兜底 `setAwaitingAgent(false)` |
 | `pain_signal_added` | extract_signals | append timeline |
 | `candidate_updated` | score_candidates | 更新候選卡 |
+| `stage_changed` | converge_check（stage 遞進時） | 已在 `KNOWN_EVENTS`；前端目前無專屬 handler |
 | `ai_necessity_warning` | score_candidates 偵測 | `setAiNecessityWarn` + cache-read guard |
 | `stage5_stuck` | converge_check 偵測 | `setStage5Stuck` + cache-read guard |
 | `cold_exit` | converge_check 偵測 2 連否定 | refetch、顯示 cold UI |
@@ -283,7 +284,6 @@ grep -l _resolve_backend Plan_BU_Agent/diagrams/*.mmd
 
 ## 已知 trade-off / 待補圖（如未來需要）
 
-- **build_deliverables 是否 publish `deliverables_ready`** 目前 code 中由 mode 切 done 帶動，未顯式 publish。`13_sse_event_flow.mmd` 與 S10 標 ⚠️ 「推測」。
 - **Quality gate fail 時的 BU 互動細節**（衝突如何手動解）目前 M3 mock 永遠 pass，未實作分支；之後實作後要補 S12 sequence。
 - **Cold exit 後 BU 能否手動 reset 回 Explore** 目前要回 sessions list 重起或從 modal 觸發 reset_explore（可由 S11 涵蓋），但前端 UI 沒有獨立 cold→reset 按鈕。
 

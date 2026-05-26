@@ -51,3 +51,7 @@ docker-compose.override.yml
 /*.gif
 螢幕擷取畫面*
 Screenshot*
+
+# Mermaid render output — only .mmd source is tracked; render via mermaid.live or local mmdc
+Plan_BU_Agent/diagrams/*.png
+Plan_BU_Agent/diagrams/*.svg
