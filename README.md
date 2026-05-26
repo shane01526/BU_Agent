@@ -12,11 +12,13 @@
 BU 端 BRD 草擬助手：Explore（發想）→ Consult（建 BRD 初稿）→ 交接 BA Agent。
 
 依據文件：
-- [`Plan_bu_agent/bu_agent_overview.md`](Plan_bu_agent/bu_agent_overview.md) v0.3 — 整體規劃
-- [`Plan_bu_agent/bu_agent_user_stories_and_flow.md`](Plan_bu_agent/bu_agent_user_stories_and_flow.md) v0.1 — User Stories
-- [`Plan_bu_agent/bu_agent_technical_design.md`](Plan_bu_agent/bu_agent_technical_design.md) v0.2 — 技術設計
-- [`Plan_bu_agent/agent_dialog_logic.md`](Plan_bu_agent/agent_dialog_logic.md) — 對話 / 彈窗邏輯
-- [`Plan_bu_agent/agent_prompting_rules.md`](Plan_bu_agent/agent_prompting_rules.md) v0.2 — Prompt 規則
+- [`Plan_BU_Agent/bu_agent_overview.md`](Plan_BU_Agent/bu_agent_overview.md) v0.3 — 整體規劃
+- [`Plan_BU_Agent/bu_agent_user_stories_and_flow.md`](Plan_BU_Agent/bu_agent_user_stories_and_flow.md) v0.1 — User Stories
+- [`Plan_BU_Agent/bu_agent_technical_design.md`](Plan_BU_Agent/bu_agent_technical_design.md) v0.3 — 技術設計
+- [`Plan_BU_Agent/agent_dialog_logic.md`](Plan_BU_Agent/agent_dialog_logic.md) v0.2 — 對話 / 彈窗邏輯
+- [`Plan_BU_Agent/agent_prompting_rules.md`](Plan_BU_Agent/agent_prompting_rules.md) v0.2 — Prompt 規則
+- [`Plan_BU_Agent/frontend_platform_comparison.md`](Plan_BU_Agent/frontend_platform_comparison.md) v0.2 — 前端平台選型背景
+- [`Plan_BU_Agent/system_flow.md`](Plan_BU_Agent/system_flow.md) — 系統流程圖（Miro-ready Mermaid）
 
 ---
 
@@ -24,15 +26,16 @@ BU 端 BRD 草擬助手：Explore（發想）→ Consult（建 BRD 初稿）→ 
 
 ```
 BU_Agent/
-├── Plan_bu_agent/          # 規劃與設計文件（不是 code）
+├── Plan_BU_Agent/          # 規劃與設計文件（不是 code）
 ├── past/                   # 舊三姊妹架構 PRD 參考
-├── backend/                # FastAPI + LangGraph 服務
+├── backend/                # FastAPI + LangGraph 服務（含 migrations/）
 ├── frontend/               # Next.js web app
-├── shared/                 # 前後端共用 schema（Pydantic ↔ TypeScript）
-├── infra/                  # docker-compose、Alembic migration、seed
+├── infra/                  # seed.sql（測試使用者）
 ├── .gitignore
 ├── .env.example
-└── docker-compose.yml
+├── docker-compose.yml
+├── Code_Review_SOP.md            # 通用 code review SOP
+└── Code_Review_SOP_BU_Agent.md   # 本專案專屬補充檢查點
 ```
 
 ---
@@ -82,12 +85,13 @@ pip install -e ".[dev]"
 # 跑 migration
 alembic upgrade head
 
-# 建測試使用者
+# 建測試使用者（與 backend/scripts/entrypoint.sh 同步：兩個 BU SME + 一個 BA 預留）
 python -c "from app.core.db import SessionLocal; from app.models.db import User; \
 db=SessionLocal(); \
 [db.add(User(user_id=i, display_name=n, email=e, bu=b, role=r)) for i,n,e,b,r in \
  [('dev-bu-001','Dev BU 001（產險 SME）','dev-bu-001@example.local','產險','bu_sme'), \
-  ('dev-bu-002','Dev BU 002（壽險 SME）','dev-bu-002@example.local','壽險','bu_sme')] \
+  ('dev-bu-002','Dev BU 002（壽險 SME）','dev-bu-002@example.local','壽險','bu_sme'), \
+  ('dev-ba-001','Dev BA 001',              'dev-ba-001@example.local',  None,  'ba')] \
  if db.get(User, i) is None]; \
 db.commit(); print('seeded')"
 
@@ -181,6 +185,25 @@ sudo systemctl enable --now docker
 | `docker compose up` 卡在 frontend build | EC2 RAM 不夠（Next build 吃 ~1.5GB），升級 instance 或加 swap |
 | `:8000/health` 401 Incorrect API key | host shell env 蓋過 `.env`：`docker compose exec backend bash -lc 'echo ${OPENAI_API_KEY:0:11}'` 比對 |
 
+**⚠️ 改 backend 內部連線方式時要 rebuild frontend image**
+
+Next.js `output: 'standalone'` 模式下，`next.config.mjs` 的 `rewrites()` destination 在 **build 時**就被序列化進 `.next/routes-manifest.json` 與 `server.js`。也就是：在 docker-compose 的 `environment:` 區塊改 `BACKEND_INTERNAL_URL` runtime 值會被忽略，rewrites 仍指向 build 時的目標。
+
+解法：`frontend/Dockerfile` 的 builder stage 已用 `ARG BACKEND_INTERNAL_URL=http://backend:8000` + `ENV` 把預設值烤進 build。
+
+**何時要重 build frontend image？**
+- 改 backend 在 docker-compose 內的 service name（從 `backend` 改成別的）
+- 改 backend 內部 port（從 `8000` 改成別的）
+- frontend 容器要指向不同 host 的 backend（例如改打外部 backend 而非同一 compose 的 service）
+
+```bash
+docker compose build --no-cache frontend && docker compose up -d frontend
+```
+
+一般情況下（同一台 EC2 跑 compose、3 個 service 都用預設名）不需要動。瀏覽器端 SSE 仍走 runtime 從 `window.location.hostname` 推 `:8000`，不受此影響。
+
+參考檔案：`frontend/next.config.mjs`（rewrites 定義）、`frontend/Dockerfile` builder stage、`docker-compose.yml` frontend 區塊註解。
+
 **回到本機 dev**：把 `.env` 的 `APP_ENV=prod` 改 `local`，並改用 host-side `pnpm dev` / `uvicorn ... --reload` 而非 docker-compose（image 是 prod build，不適合 hot reload）。
 
 ---
@@ -208,7 +231,7 @@ sudo systemctl enable --now docker
 
 尚未接 Cathay SSO 前，後端以 `X-User-Id` header 辨識使用者；Frontend 登入頁會存一個固定 user_id 到 cookie。
 
-- 預設測試使用者：`dev-bu-001`（在 `infra/seed.sql` 建立）
+- 預設測試使用者：`dev-bu-001`（容器啟動時 `backend/scripts/entrypoint.sh` 自動 seed；另含 `dev-bu-002` 壽險 SME、`dev-ba-001` 給未來 BA 流程預留）
 - 切換其他測試使用者：Frontend 開發工具改 cookie `x-dev-user-id`
 
 上 prod / 串 Cathay SSO 時，見 `backend/app/auth/README.md`。
