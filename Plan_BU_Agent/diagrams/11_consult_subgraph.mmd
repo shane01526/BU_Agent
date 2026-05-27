@@ -22,7 +22,7 @@ flowchart TD
     QGate -- "命中 conflicts<br/>publish conflict_detected" --> EndOK
     QGate -- "無 conflict" --> EndOK
 
-    BuildDeliv -- "寫 deliverables 表<br/>publish deliverables_ready (推測)" --> EndOK
+    BuildDeliv -- "寫 deliverables 表<br/>publish deliverables_ready<br/>(consult/nodes.py:596)" --> EndOK
 
     %% 外部 service 入口（不是 graph 內部 node，但相關）
     SVC1[("BU 在 chat 回 BU reply<br/>session_service.run_turn 後<br/>_integrate_bu_answer_to_section<br/>session_service.py:203<br/>LLM merge BU answer 進 draft")]

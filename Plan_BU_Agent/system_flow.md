@@ -1,13 +1,15 @@
 
-# BU Agent 系統流程圖（Miro-ready）
+# BU Agent 系統流程圖
 
 > **Last updated 2026-05-25** — 對齊 code 現況的 18 張 Mermaid 流程圖
-> 用途：跨 backend / frontend / SSE / LLM / DB 邊界的視覺化單一入口；給新人 onboard、給 PM review、給工程師 debug
-> 配套檔：`Plan_BU_Agent/diagrams/*.mmd`（每張一檔，Miro 可獨立 import）
+> 
+> 用途：跨 backend / frontend / SSE / LLM / DB 邊界的視覺化單一入口
+> 
+> 配套檔：`Plan_BU_Agent/diagrams/*.mmd`（每張一檔）；逐張的步驟解說見 [`system_flow_explain.md`](system_flow_explain.md)
 
 ---
 
-## TL;DR（30 秒 onboard）
+## TL;DR（onboard）
 
 BU Agent 是「BU 端 BRD 草擬助手」：
 1. **Onboarding**：BU 在 `/sessions/new` 填 BU 別 / 角色 / hint，**選一個 LLM 模型**（OpenAI / Gemini，session 級綁定）
@@ -24,7 +26,7 @@ BU Agent 是「BU 端 BRD 草擬助手」：
 
 | ID | 檔名 | 主題 | 一句話 |
 |---|---|---|---|
-| **L0** | `00_main_journey.mmd` | 端到端旅程 | 從 login 到送 BA 的高層活動圖（含 cold / 三個 modal 的岔出路徑） |
+| **L0** | `00_main_journey.mmd` | 端到端旅程 | 從 login 到送 BA 的高層活動圖（含 cold exit / 三個 modal 的岔出路徑） |
 | L1.1 | `10_explore_subgraph.mmd` | Explore Subgraph | 7 個節點 + 7 分支 after_converge routing；ai_necessity / stage5_stuck / cold 三條岔出 |
 | L1.2 | `11_consult_subgraph.mmd` | Consult Subgraph | load_template → auto_fill_outline → section_loop → quality_gate → build_deliverables；entry router 4 分支 |
 | L1.3 | `12_deferred_reply_pattern.mmd` | Deferred-Reply Pattern | `pending_*_decision` flag 的 state machine（Idle / AiPending / S5Pending / ReadyHandoff） |
@@ -50,7 +52,7 @@ BU Agent 是「BU 端 BRD 草擬助手」：
 
 ---
 
-## 主要 5 張內嵌（30 秒看懂全貌）
+## 主要 5 張內嵌
 
 ### L0 端到端旅程（縮略）
 
