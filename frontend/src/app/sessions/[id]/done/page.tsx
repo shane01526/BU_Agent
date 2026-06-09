@@ -25,6 +25,23 @@ export default function DonePage() {
     (s) => s.status === 'flagged_for_ba',
   );
 
+  async function handleDownload() {
+    try {
+      const md = await api.downloadDeliverable(sessionId);
+      const blob = new Blob([md], { type: 'text/markdown;charset=utf-8' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `BRD_${sessionId.slice(0, 8)}.md`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      alert(`下載失敗：${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+
   return (
     <main className="min-h-screen bg-neutral-50 px-6 py-10">
       <div className="mx-auto max-w-4xl space-y-6">
@@ -81,12 +98,20 @@ export default function DonePage() {
           >
             ← 返回 sessions 列表
           </Link>
-          <button
-            onClick={() => window.print()}
-            className="rounded-md border px-4 py-2 text-sm hover:bg-neutral-50"
-          >
-            列印 / 另存 PDF
-          </button>
+          <div className="flex gap-2">
+            <button
+              onClick={handleDownload}
+              className="rounded-md border px-4 py-2 text-sm hover:bg-neutral-50"
+            >
+              下載 BRD (.md)
+            </button>
+            <button
+              onClick={() => window.print()}
+              className="rounded-md border px-4 py-2 text-sm hover:bg-neutral-50"
+            >
+              列印 / 另存 PDF
+            </button>
+          </div>
         </div>
       </div>
     </main>

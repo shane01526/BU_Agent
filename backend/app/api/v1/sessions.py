@@ -7,13 +7,14 @@ import uuid
 from typing import Annotated
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
+from fastapi.responses import Response
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.auth.middleware import current_user
 from app.core.db import get_db
 from app.core.logging import get_logger
-from app.models.db import SessionRow, User
+from app.models.db import BrdSection, Deliverable, SessionRow, User
 from app.models.schemas import (
     AcceptedResponse,
     CandidateSelectRequest,
@@ -475,4 +476,42 @@ async def submit_session(
         brd_doc_ref=out["brd_doc_ref"] or "",
         summary_json=out["summary_json"] or {},
         flag_for_ba_review={"sections": out["flag_for_ba_review"]},
+    )
+
+
+@router.get("/{session_id}/deliverable.md")
+async def download_deliverable(
+    session_id: uuid.UUID,
+    user: Annotated[User, Depends(current_user)],
+    db: Annotated[Session, Depends(get_db)],
+) -> Response:
+    """下載已送 BA 的 BRD markdown 檔（含標記給 BA 章節註記）。"""
+    session = db.get(SessionRow, session_id)
+    if session is None or session.user_id != user.user_id:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "session not found")
+
+    deliverable = db.get(Deliverable, session_id)
+    if deliverable is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "deliverable not found")
+
+    md = deliverable.brd_doc_ref or ""
+
+    # 附上「標記給 BA 補洞的章節」清單（section_id → title）。
+    flagged_ids = (deliverable.flag_for_ba_review or {}).get("sections") or []
+    if flagged_ids:
+        rows = db.scalars(
+            select(BrdSection).where(
+                BrdSection.session_id == session_id,
+                BrdSection.section_id.in_(flagged_ids),
+            )
+        ).all()
+        title_by_id = {r.section_id: r.title for r in rows}
+        lines = [f"- {title_by_id.get(sid, sid)}" for sid in flagged_ids]
+        md = md.rstrip() + "\n\n## 標記給 BA 補洞的章節\n\n" + "\n".join(lines) + "\n"
+
+    filename = f"BRD_{str(session_id)[:8]}.md"
+    return Response(
+        content=md,
+        media_type="text/markdown; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )

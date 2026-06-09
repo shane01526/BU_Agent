@@ -142,8 +142,10 @@ class GraphState(BaseModel):
     user_id: str
 
     # mode state
+    # "submit" 是 service 層送 BA 時暫時設的觸發值（consult subgraph entry router
+    # 用它路由到 build_deliverables）；build_deliverables 末端再把 mode 設回 "done"。
     mode: Literal[
-        "explore", "consult_step1", "consult_step2", "done", "cold"
+        "explore", "consult_step1", "consult_step2", "submit", "done", "cold"
     ] = "explore"
     stage: int = 1  # Explore 題庫階段 1-5
 

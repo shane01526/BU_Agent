@@ -159,6 +159,16 @@ export const api = {
     }),
   submitSession: (id: string) =>
     request<Deliverables>(`/sessions/${id}/submit`, { method: 'POST' }),
+  downloadDeliverable: async (id: string): Promise<string> => {
+    const res = await fetch(`${BASE}/sessions/${id}/deliverable.md`, {
+      headers: headers(),
+    });
+    if (!res.ok) {
+      const body = await res.text().catch(() => '');
+      throw new Error(`${res.status} ${res.statusText}: ${body}`);
+    }
+    return res.text();
+  },
 };
 
 export const SSE_URL = (sessionId: string, userId: string) =>
