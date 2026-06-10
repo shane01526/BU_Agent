@@ -38,6 +38,8 @@ class CandidateDirection(BaseModel):
     project_type: str
     # rule_repeat / data_avail / reversibility / scale_roi / gap
     score_5d: dict[str, int] = Field(default_factory=dict)
+    # 每個維度一句話描述「為何給這分」；key 同 score_5d
+    score_5d_desc: dict[str, str] = Field(default_factory=dict)
     pain_signals: list[str] = Field(default_factory=list)
     # AI 必要性 triage（M4 加入,擋過度導 AI）
     solution_class: str | None = None  # 7 類之一,見 SOLUTION_CLASSES
@@ -78,6 +80,16 @@ class CandidateScore5d(BaseModel):
     gap: int = Field(ge=1, le=5)
 
 
+class CandidateScore5dDesc(BaseModel):
+    """5 維評分各一句話描述（為何給這分）。"""
+
+    rule_repeat: str
+    data_avail: str
+    reversibility: str
+    scale_roi: str
+    gap: str
+
+
 class CandidateDraft(BaseModel):
     """LLM 評分 output 的單條候選。"""
 
@@ -86,6 +98,7 @@ class CandidateDraft(BaseModel):
     process_target: str
     project_type: str
     score_5d: CandidateScore5d
+    score_5d_desc: CandidateScore5dDesc
     pain_signals: list[str] = Field(default_factory=list)
     solution_class: Literal[
         "rule", "rpa", "pipeline", "classical_ml",
@@ -165,6 +178,8 @@ class GraphState(BaseModel):
     scored_candidates: list[CandidateDirection] = Field(default_factory=list)
     selected_candidate: int | None = None
     ready_to_handoff: bool = False
+    # BU 已「不採用」的候選方向文字；餵給評分 prompt 避免重生同方向
+    rejected_directions: list[str] = Field(default_factory=list)
 
     # Stage 5 卡關偵測:
     # - stage_5_rounds:在 stage 5 已跑過幾輪 discovery_loop

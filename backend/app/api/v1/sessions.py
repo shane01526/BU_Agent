@@ -206,6 +206,23 @@ async def select_candidate(
     return AcceptedResponse()
 
 
+@router.post(
+    "/{session_id}/candidates/{rank}/reject", response_model=AcceptedResponse
+)
+async def reject_candidate(
+    session_id: uuid.UUID,
+    rank: int,
+    user: Annotated[User, Depends(current_user)],
+    db: Annotated[Session, Depends(get_db)],
+) -> AcceptedResponse:
+    """BU 對某張候選卡按「不採用」:移除該卡;全拒時 agent 重新發想。"""
+    session = db.get(SessionRow, session_id)
+    if session is None or session.user_id != user.user_id:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "session not found")
+    await session_service.reject_candidate(db, session, rank)
+    return AcceptedResponse()
+
+
 @router.post("/{session_id}/handoff/confirm", response_model=AcceptedResponse)
 async def confirm_handoff(
     session_id: uuid.UUID,

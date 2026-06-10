@@ -1,5 +1,7 @@
 'use client';
 
+import { useState } from 'react';
+
 import clsx from 'clsx';
 
 export interface Candidate {
@@ -8,6 +10,7 @@ export interface Candidate {
   process_target: string;
   project_type: string;
   score_5d: Record<string, number>;
+  score_5d_desc?: Record<string, string>;
   pain_signals: string[];
 }
 
@@ -23,11 +26,13 @@ export function CandidateCards({
   candidates,
   selected,
   onSelect,
+  onReject,
   generatingHandoff = false,
 }: {
   candidates: Candidate[];
   selected: number | null;
   onSelect: (rank: number) => void;
+  onReject: (rank: number) => void;
   generatingHandoff?: boolean;
 }) {
   if (candidates.length === 0) {
@@ -43,16 +48,14 @@ export function CandidateCards({
         const isSelected = selected === c.rank;
         const isGenerating = generatingHandoff && isSelected;
         return (
-          <button
+          <div
             key={c.rank}
-            disabled={generatingHandoff}
-            onClick={() => onSelect(c.rank)}
             className={clsx(
               'w-full rounded-lg border p-4 text-left transition',
               isSelected
                 ? 'border-accent bg-accent/5'
-                : 'bg-white hover:border-neutral-300',
-              generatingHandoff && !isSelected && 'opacity-50 cursor-not-allowed',
+                : 'bg-white',
+              generatingHandoff && !isSelected && 'opacity-50',
               isGenerating && 'ring-2 ring-accent/40',
             )}
           >
@@ -70,7 +73,7 @@ export function CandidateCards({
                 {c.process_target} · {c.project_type}
               </div>
             </div>
-            <RubricHeatmap score={c.score_5d} />
+            <RubricHeatmap score={c.score_5d} desc={c.score_5d_desc} />
             {c.pain_signals.length > 0 && (
               <div className="mt-2 flex flex-wrap gap-1">
                 {c.pain_signals.map((p) => (
@@ -83,29 +86,88 @@ export function CandidateCards({
                 ))}
               </div>
             )}
-          </button>
+            <div className="mt-3 flex gap-2">
+              <button
+                onClick={() => onSelect(c.rank)}
+                disabled={generatingHandoff}
+                className={clsx(
+                  'flex-1 rounded-md px-3 py-2 text-sm font-medium transition',
+                  generatingHandoff
+                    ? 'bg-neutral-200 text-neutral-400 cursor-not-allowed'
+                    : 'bg-accent text-white hover:bg-accent-muted',
+                )}
+              >
+                採用此方向
+              </button>
+              <button
+                onClick={() => onReject(c.rank)}
+                disabled={generatingHandoff}
+                className={clsx(
+                  'rounded-md border px-3 py-2 text-sm transition',
+                  generatingHandoff
+                    ? 'text-neutral-300 cursor-not-allowed'
+                    : 'text-neutral-600 hover:bg-neutral-50',
+                )}
+              >
+                不採用
+              </button>
+            </div>
+          </div>
         );
       })}
     </div>
   );
 }
 
-function RubricHeatmap({ score }: { score: Record<string, number> }) {
+function RubricHeatmap({
+  score,
+  desc,
+}: {
+  score: Record<string, number>;
+  desc?: Record<string, string>;
+}) {
+  const [openKey, setOpenKey] = useState<string | null>(null);
   return (
-    <div className="mt-3 grid grid-cols-5 gap-2">
-      {Object.entries(DIM_LABELS).map(([key, label]) => {
-        const v = score[key] ?? 0;
-        return (
-          <div key={key} className="text-center">
-            <div
-              className="mx-auto h-6 w-6 rounded"
-              style={{ background: `rgba(15, 118, 110, ${0.15 + v * 0.17})` }}
-            />
-            <div className="mt-1 text-[10px] text-neutral-500">{label}</div>
-            <div className="text-xs font-medium text-neutral-700">{v}</div>
-          </div>
-        );
-      })}
+    <div className="mt-3">
+      <div className="grid grid-cols-5 gap-2">
+        {Object.entries(DIM_LABELS).map(([key, label]) => {
+          const v = score[key] ?? 0;
+          const hasDesc = !!desc?.[key];
+          const isOpen = openKey === key;
+          return (
+            <button
+              key={key}
+              type="button"
+              disabled={!hasDesc}
+              onClick={() => setOpenKey(isOpen ? null : key)}
+              className={clsx(
+                'text-center rounded p-1 transition',
+                hasDesc && 'hover:bg-neutral-50 cursor-pointer',
+                isOpen && 'bg-neutral-100',
+                !hasDesc && 'cursor-default',
+              )}
+            >
+              <div
+                className="mx-auto h-6 w-6 rounded"
+                style={{ background: `rgba(15, 118, 110, ${0.15 + v * 0.17})` }}
+              />
+              <div className="mt-1 text-[10px] text-neutral-500">{label}</div>
+              <div className="text-xs font-medium text-neutral-700">
+                {v}
+                {hasDesc && <span className="ml-0.5 text-neutral-400">ⓘ</span>}
+              </div>
+            </button>
+          );
+        })}
+      </div>
+      {openKey && desc?.[openKey] && (
+        <div className="mt-2 rounded bg-neutral-50 px-3 py-2 text-xs text-neutral-600">
+          <span className="font-medium text-neutral-700">
+            {DIM_LABELS[openKey]}：
+          </span>
+          {desc[openKey]}
+        </div>
+      )}
     </div>
   );
 }

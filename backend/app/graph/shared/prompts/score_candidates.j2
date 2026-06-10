@@ -14,6 +14,11 @@ BU 的工程資源有限,做錯方向會浪費好幾週。
 - scale_roi:每月處理量 × 節省工時
 - gap:目前無人 / 工具不足的程度
 
+## 每維描述(score_5d_desc)
+除了打分,每個維度都要附**一句 20-40 字的描述**,說明「為什麼這維給這個分數」,
+並盡量引用 BU 在 pain signals 提到的具體業務名詞(流程名 / 系統名 / 文件型別 / 量能等)。
+不要寫「分數高」「還好」這種空話,要講具體理由。
+
 ## solution_class — 7 類由輕到重(必須先選最輕的可行類)
 1. **rule**:規則明確、可窮舉的條件判斷。例:「文件名稱含特定關鍵字 → 歸 X 類」
 2. **rpa**:跨系統搬資料、UI 自動化、無需判斷。例:「每天從 A 系統抓 PDF 上傳到 B」
@@ -68,6 +73,14 @@ BU 的工程資源有限,做錯方向會浪費好幾週。
   "direction": "理賠文件型別自動分類",
   "process_target": "理賠文件",
   "project_type": "分類",
+  "score_5d": {"rule_repeat": 4, "data_avail": 4, "reversibility": 5, "scale_roi": 4, "gap": 5},
+  "score_5d_desc": {
+    "rule_repeat": "理賠文件歸檔每天重複、流程固定,但類別 30+ 種難用純規則窮舉。",
+    "data_avail": "歷史理賠文件量大且已分類歸檔,可作為標註與推論素材。",
+    "reversibility": "分類錯誤可由理賠人員覆核改正,有 audit、風險可控。",
+    "scale_roi": "月均大量文件人工歸檔耗時,自動分類可省下可觀工時。",
+    "gap": "目前全靠人工判讀型別、無工具輔助,缺口明顯。"
+  },
   "solution_class": "llm_extract",
   "ai_necessity": "high",
   "solution_rationale": "輸入為非結構化掃描檔(PDF / 影像 / Email)、類別 30+ 種且常混淆;規則窮舉維護成本極高,LLM 抽取能彈性處理新類型。"
@@ -92,6 +105,14 @@ BU 的工程資源有限,做錯方向會浪費好幾週。
 - 若候選方向落在該 BU `preferred_solution_classes` → ai_necessity 標 high 時 rationale 要點到對應偏好
 {% endif %}
 
+{% if rejected_directions %}
+## BU 已明確「不採用」的方向(務必避開)
+以下方向 BU 已看過並拒絕,**不要再提出這些或換湯不換藥的相似方向**,請從不同切角重新發想:
+{% for d in rejected_directions %}
+  - {{ d }}
+{% endfor %}
+{% endif %}
+
 ## 上下文
 - BU={{ bu }} 部門 / SME={{ sme_role }}
 - pain signals:
@@ -104,6 +125,8 @@ BU 的工程資源有限,做錯方向會浪費好幾週。
 - direction 用「動詞 + 流程目標 + 任務類型」格式
 - project_type ∈ {分類 / 抽取 / 摘要 / 生成 / QA / 排序 / 異常偵測}
 - score 1-5 整數,保守給分
+- score_5d_desc 必須對 5 個維度(rule_repeat / data_avail / reversibility / scale_roi / gap)
+  各給一句 20-40 字描述,說明該維度為何給此分
 - solution_class / ai_necessity 嚴格依上述判斷流程
 - **solution_rationale 必須 40-80 字**,要點出「為什麼這類就夠 / 為什麼非要 AI」,
   且**至少引用一個 BU 在 pain signals 中提到的具體業務名詞**(流程名 / 系統名 / 文件型別 / 量能等)。

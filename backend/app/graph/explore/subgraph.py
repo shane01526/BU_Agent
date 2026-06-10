@@ -62,20 +62,19 @@ def build_explore_subgraph() -> StateGraph:
             return END
         if state.ready_to_handoff:
             return "emit_dual_output"
-        # v11: stage>=4 + 已有候選時兩條分流:
-        #  - BU 對候選不滿(關鍵字命中)或上一輪被叫選卻沒選 → discovery_loop 換切角發散
-        #  - 其他(BU 在補脈絡 / 確認候選) → acknowledge_and_guide 承接 + 引導
-        # 為什麼:v10 一律走 acknowledge_and_guide,造成 BU 不喜歡候選時 agent 仍只會叫他選。
-        if state.scored_candidates and state.stage >= 4:
-            if nodes.needs_divergent_question(state):
-                return "discovery_loop"
-            return "acknowledge_and_guide"
+        # v12: 只要已有候選卡片 → 停話、END,等 BU 在右側對卡片按「採用 / 不採用」決策。
+        # agent 不再主動問下一題或回引導語(那會在卡片剛冒出時搶話、打斷 BU 看卡)。
+        #  - 採用 → select_candidate 觸發 emit_dual_output
+        #  - 不採用 → reject_candidate 移除卡片;全拒時才由 service stream 重新發想回覆
+        # 前端輸入框靠 turn_done 事件解鎖;BU 仍可打字補脈絡,下輪重評分更新卡片。
+        if state.scored_candidates:
+            return END
         return "discovery_loop"
 
     g.add_conditional_edges(
         "converge_check",
         after_converge,
-        [END, "emit_dual_output", "discovery_loop", "acknowledge_and_guide"],
+        [END, "emit_dual_output", "discovery_loop"],
     )
     g.add_edge("acknowledge_and_guide", END)
     g.add_edge("emit_dual_output", END)

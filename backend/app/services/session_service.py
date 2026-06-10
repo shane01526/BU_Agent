@@ -192,10 +192,16 @@ async def confirm_handoff(db: Session, session: SessionRow) -> GraphState:
 
 
 async def dismiss_handoff(db: Session, session: SessionRow) -> GraphState:
-    """BU 在 modal 點「再討論一下」：清 ready_to_handoff，回到 stage 5 對話。"""
+    """BU 在 modal 點「再討論一下」：清 ready_to_handoff + selected_candidate，回到對話。
+
+    必須一併清 selected_candidate:否則殘留值會讓 converge_check 在 stage 5 每輪都
+    自動 ready_to_handoff(誤觸綜整文字),且讓卡關偵測(需 selected_candidate is None)永遠跳過。
+    """
     graph = await get_graph()
     config = {"configurable": {"thread_id": str(session.session_id)}}
-    await graph.aupdate_state(config, {"ready_to_handoff": False})
+    await graph.aupdate_state(
+        config, {"ready_to_handoff": False, "selected_candidate": None}
+    )
     snap = await graph.aget_state(config)
     return GraphState.model_validate(snap.values)
 
@@ -685,10 +691,17 @@ async def _run_ai_necessity_decision(
         "history": new_history,
         "ai_necessity_warned": True,
         "pending_ai_necessity_decision": False,
+        # 彈窗決策結束 → 清空本輪候選卡片,讓使用者跟 agent 繼續對話、下輪再重評分。
+        # 避免「彈窗處理完但舊卡片殘留」鎖住輸入框。
+        "scored_candidates": [],
+        "candidate_directions": [],
     }
     if extra_state_patch:
         patch.update(extra_state_patch)
     await graph.aupdate_state(config, patch)
+    await bus.publish(
+        str(session.session_id), "candidate_updated", {"candidates": []}
+    )
 
     snap = await graph.aget_state(config)
     return GraphState.model_validate(snap.values)
@@ -812,7 +825,13 @@ async def dismiss_stage5_stuck(db: Session, session: SessionRow) -> GraphState:
             "history": new_history,
             "stage_5_stuck_acked": True,
             "pending_stage5_decision": False,
+            # 彈窗決策結束 → 清空本輪候選卡片,讓使用者跟 agent 繼續對話、下輪再重評分。
+            "scored_candidates": [],
+            "candidate_directions": [],
         },
+    )
+    await bus.publish(
+        str(session.session_id), "candidate_updated", {"candidates": []}
     )
 
     snap = await graph.aget_state(config)
@@ -918,3 +937,115 @@ async def select_candidate(
         state = GraphState.model_validate(snap.values)
 
     return state
+
+
+async def reject_candidate(
+    db: Session, session: SessionRow, rank: int
+) -> GraphState:
+    """BU 在工作區對某張候選卡按「不採用」:移除該卡、記下被拒方向。
+
+    - 還有剩餘候選 → 卡片更新即可,agent 不主動講話(等 BU 繼續決策)。
+    - 全部被拒 → stream 一段「換切角重新發想」的 agent 回覆,引導 BU 補新脈絡;
+      被拒方向會餵進評分 prompt,下輪 BU 回覆時產出發散的新候選。
+    """
+    from app.graph.shared.state import CandidateDirection
+
+    graph = await get_graph()
+    config = {"configurable": {"thread_id": str(session.session_id)}}
+    snap = await graph.aget_state(config)
+    state = GraphState.model_validate(snap.values)
+
+    # normalize 成 CandidateDirection(state 內可能是 dict)
+    scored = [
+        c if isinstance(c, CandidateDirection)
+        else CandidateDirection.model_validate(c)
+        for c in state.scored_candidates
+    ]
+    removed = next((c for c in scored if c.rank == rank), None)
+    remaining = [c for c in scored if c.rank != rank]
+
+    # 找不到該 rank → 視為已移除,直接 republish 現況、回傳
+    if removed is None:
+        await bus.publish(
+            str(session.session_id),
+            "candidate_updated",
+            {"candidates": [c.model_dump() for c in remaining]},
+        )
+        return state
+
+    rejected = list(state.rejected_directions)
+    if removed.direction not in rejected:
+        rejected.append(removed.direction)
+
+    await graph.aupdate_state(
+        config,
+        {
+            "scored_candidates": remaining,
+            "candidate_directions": remaining,
+            "rejected_directions": rejected,
+            # 清殘留選擇:被否決的卡可能正是先前 selected 的,殘留值會誤觸 handoff
+            "selected_candidate": None,
+        },
+    )
+    # 前端卡片消失(republish 剩餘清單)
+    await bus.publish(
+        str(session.session_id),
+        "candidate_updated",
+        {"candidates": [c.model_dump() for c in remaining]},
+    )
+
+    # 還有剩餘 → 不講話,等 BU 繼續決策
+    if remaining:
+        snap = await graph.aget_state(config)
+        return GraphState.model_validate(snap.values)
+
+    # 全部被拒 → stream「換切角重新發想」的 agent 回覆
+    from app.graph.shared.prompts import render
+
+    snap = await graph.aget_state(config)
+    state = GraphState.model_validate(snap.values)
+
+    bu_label = f"不採用 #{rank}：{removed.direction}"
+    bu_turn_id, state = await _record_bu_option_choice(graph, config, state, bu_label)
+
+    prompt_text = render(
+        "reject_reexplore",
+        bu=state.bu,
+        sme_role=state.sme_role,
+        rejected_directions=list(state.rejected_directions),
+        recent_pain_signals=_recent_pain_signals(state),
+        last_bu_text=_last_bu_text(state),
+    )
+    agent_turn_id = bu_turn_id + 1
+    agent_text = await _stream_agent_reply(
+        str(session.session_id),
+        agent_turn_id,
+        state.llm_model,
+        prompt_text,
+        fallback_text=(
+            "謝謝你明確說不,這樣我們能更快找到對的方向。剛剛那些切角看來都不貼合,"
+            "我們換個角度:你在這個流程裡,覺得最花時間或最常出錯的環節是哪一段?"
+            "從那裡重新想,可能會找到更實際的方向。"
+        ),
+    )
+
+    agent_trace = TraceEntry(
+        turn_id=agent_turn_id,
+        mode=state.mode,
+        role="agent",
+        raw_text=agent_text,
+        timestamp=_now_iso(),
+    )
+    new_history = list(state.history) + [agent_trace]
+    reject_patch: dict = {"history": new_history}
+    # 在 stage 5 反覆「全否決卡片」也算卡關:累加 stage_5_rounds,
+    # 讓收斂彈窗能在後續對話輪(converge_check)正常觸發。
+    # 這裡只累計、不直接 emit 彈窗,避免與本輪剛 stream 的重新發想回覆搶話。
+    from app.graph.explore.nodes import MAX_STAGE
+
+    if state.stage >= MAX_STAGE and not state.stage_5_stuck_acked:
+        reject_patch["stage_5_rounds"] = state.stage_5_rounds + 1
+    await graph.aupdate_state(config, reject_patch)
+
+    snap = await graph.aget_state(config)
+    return GraphState.model_validate(snap.values)

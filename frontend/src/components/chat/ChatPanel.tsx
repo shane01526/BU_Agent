@@ -15,6 +15,7 @@ export interface ChatMessage {
 export function ChatPanel({
   messages,
   disabled,
+  disabledHint,
   thinking = false,
   onSend,
   actionBarSlot,
@@ -22,6 +23,8 @@ export function ChatPanel({
 }: {
   messages: ChatMessage[];
   disabled: boolean;
+  /** disabled 時 placeholder 顯示的提示文字。預設「等 agent 回覆中…」。 */
+  disabledHint?: string;
   thinking?: boolean;
   onSend: (text: string) => void;
   /** textarea 上方插槽。Consult 全寬版用來放 InlineActionBar。 */
@@ -67,7 +70,11 @@ export function ChatPanel({
           <textarea
             className="w-full rounded-md border px-3 py-2 text-sm"
             rows={2}
-            placeholder={disabled ? '等 agent 回覆中…' : '輸入你的回覆，Enter 送出'}
+            placeholder={
+              disabled
+                ? disabledHint ?? '等 agent 回覆中…'
+                : '輸入你的回覆，Enter 送出'
+            }
             value={draft}
             onChange={(e) => setDraft(e.target.value)}
             onKeyDown={(e) => {

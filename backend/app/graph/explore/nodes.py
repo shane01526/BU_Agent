@@ -341,6 +341,7 @@ async def score_candidates(state: GraphState) -> dict:
         bu=state.bu,
         sme_role=state.sme_role,
         pain_signals=[{"raw_text": p.raw_text, "source": p.source} for p in pains],
+        rejected_directions=list(state.rejected_directions),
         kc=kc,
     )
 
@@ -351,7 +352,11 @@ async def score_candidates(state: GraphState) -> dict:
         result = await llm.chat_structured(
             [{"role": "user", "content": user}], CandidateListOutput
         )
+        # 安全網:LLM 仍重生到 BU 已拒方向 → 過濾掉(比對 direction 文字)
+        rejected_set = {d.strip() for d in state.rejected_directions}
         for d in result.candidates:
+            if d.direction.strip() in rejected_set:
+                continue
             scored.append(
                 CandidateDirection(
                     rank=d.rank,
@@ -359,6 +364,7 @@ async def score_candidates(state: GraphState) -> dict:
                     process_target=d.process_target,
                     project_type=d.project_type,
                     score_5d=d.score_5d.model_dump(),
+                    score_5d_desc=d.score_5d_desc.model_dump(),
                     pain_signals=list(d.pain_signals or []),
                     solution_class=d.solution_class,
                     ai_necessity=d.ai_necessity,
@@ -458,34 +464,40 @@ async def converge_check(state: GraphState) -> dict:
         )
 
     # Stage 5 卡關偵測:已在 stage 5、跑滿 N 輪、還沒選 candidate、未 ack 過 → 推 stage5_stuck
-    STAGE5_STUCK_THRESHOLD = 3
     if next_stage == MAX_STAGE and state.selected_candidate is None:
         new_s5_rounds = state.stage_5_rounds + 1
         patch["stage_5_rounds"] = new_s5_rounds
-        if (
-            new_s5_rounds >= STAGE5_STUCK_THRESHOLD
-            and not state.stage_5_stuck_acked
-        ):
-            top_candidates = [
-                c.model_dump() if hasattr(c, "model_dump") else c
-                for c in state.scored_candidates[:3]
-            ]
-            await bus.publish(
-                state.session_id,
-                "stage5_stuck",
-                {
-                    "rounds": new_s5_rounds,
-                    "candidates": top_candidates,
-                },
-            )
-            # 鎖住本 super-step;after_converge 看到此 flag 直接 END,
-            # 避免 graph 繼續走 discovery_loop / acknowledge_and_guide 搶話。
-            # dismiss_stage5_stuck / quick_handoff service 會 clear 此 flag。
-            patch["pending_stage5_decision"] = True
+        patch.update(await maybe_emit_stage5_stuck(state, new_s5_rounds))
 
     if ready:
         patch["ready_to_handoff"] = True
     return patch
+
+
+STAGE5_STUCK_THRESHOLD = 3
+
+
+async def maybe_emit_stage5_stuck(state: GraphState, new_rounds: int) -> dict:
+    """達卡關門檻且未 ack 過 → publish stage5_stuck + 回傳 {pending_stage5_decision: True}。
+
+    converge_check(走完一輪對話)與 reject_candidate(stage 5 反覆全否決)共用,
+    讓兩條路徑都能推進卡關計數、觸發收斂彈窗。否則回 {}。
+
+    pending_stage5_decision 會鎖住本 super-step:after_converge 看到直接 END,
+    由 dismiss_stage5_stuck / quick_handoff service 接手 clear。
+    """
+    if new_rounds >= STAGE5_STUCK_THRESHOLD and not state.stage_5_stuck_acked:
+        top_candidates = [
+            c.model_dump() if hasattr(c, "model_dump") else c
+            for c in state.scored_candidates[:3]
+        ]
+        await bus.publish(
+            state.session_id,
+            "stage5_stuck",
+            {"rounds": new_rounds, "candidates": top_candidates},
+        )
+        return {"pending_stage5_decision": True}
+    return {}
 
 
 async def acknowledge_and_guide(state: GraphState) -> dict:

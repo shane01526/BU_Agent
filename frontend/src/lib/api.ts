@@ -122,6 +122,10 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ rank }),
     }),
+  rejectCandidate: (id: string, rank: number) =>
+    request<{ accepted: boolean }>(`/sessions/${id}/candidates/${rank}/reject`, {
+      method: 'POST',
+    }),
   confirmHandoff: (id: string) =>
     request<{ accepted: boolean }>(`/sessions/${id}/handoff/confirm`, { method: 'POST' }),
   dismissHandoff: (id: string) =>

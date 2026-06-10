@@ -315,6 +315,21 @@ export default function SessionPage() {
     // 不在這裡關 generatingHandoff:由 handoff_ready SSE 事件抵達時關閉
   }
 
+  async function handleRejectCandidate(rank: number) {
+    // 只有「最後一張卡」被否決時,後端才會 stream agent 回覆 → 才顯示思考中。
+    // 否決其中一張(還有剩)時不顯示 thinking;卡片移除由 candidate_updated SSE 驅動。
+    const isLast = candidates.length <= 1;
+    if (isLast) setAwaitingAgent(true);
+    try {
+      await api.rejectCandidate(sessionId, rank);
+    } catch (e) {
+      if (isLast) setAwaitingAgent(false);
+      throw e;
+    }
+    setSelectedRank(null); // 否決後清高亮,避免殘留選擇
+    qc.invalidateQueries({ queryKey: ['session', sessionId] });
+  }
+
   async function handleConfirm() {
     setHandoff(null);
     setGeneratingOutline(true);
@@ -330,6 +345,7 @@ export default function SessionPage() {
   async function handleDismissHandoff() {
     await api.dismissHandoff(sessionId);
     setHandoff(null);
+    setSelectedRank(null); // 清前端高亮,與後端清 selected_candidate 一致
   }
 
   async function handleEditSection(sectionId: string, content: string) {
@@ -447,6 +463,16 @@ export default function SessionPage() {
     !sections.some((s) => s.status === 'needs_round2');
   const isConsultMode = mode === 'consult_step1' || mode === 'consult_step2';
 
+  // 彈窗(AI 必要性 / stage5 卡關)pending 時,先不顯示候選卡片,讓使用者專心跟 agent 對話。
+  const modalPending =
+    !!aiNecessityWarn ||
+    !!stage5Stuck ||
+    data.pending_ai_necessity_decision ||
+    data.pending_stage5_decision;
+  const exploreCandidates = modalPending ? [] : candidates;
+  // 只要有未決定的候選卡片(且非生成 handoff 中),就鎖聊天輸入框,逼使用者先逐一抉擇。
+  const cardsLocking = exploreCandidates.length > 0 && !generatingHandoff;
+
   return (
     <main className="flex h-screen flex-col">
       <header className="flex items-center justify-between border-b bg-white px-6 py-3">
@@ -495,7 +521,13 @@ export default function SessionPage() {
                 awaitingAgent ||
                 !!aiNecessityWarn ||
                 !!stage5Stuck ||
+                cardsLocking ||
                 data.status !== 'active'
+              }
+              disabledHint={
+                cardsLocking
+                  ? '請先在右側對每個候選方向選擇「採用」或「不採用」才能繼續對話'
+                  : undefined
               }
               thinking={
                 !streaming &&
@@ -508,9 +540,10 @@ export default function SessionPage() {
           </section>
           <section className="w-1/2 overflow-y-auto bg-neutral-50 p-6">
             <ExploreWorkspace
-              candidates={candidates}
+              candidates={exploreCandidates}
               selectedRank={selectedRank}
               onSelectCandidate={handleSelectCandidate}
+              onRejectCandidate={handleRejectCandidate}
               painSignals={painSignals}
               mode={mode}
               coldReason={data.mode === 'cold' ? '建議離線找 BA 對焦' : null}
@@ -566,6 +599,7 @@ function ExploreWorkspace({
   candidates,
   selectedRank,
   onSelectCandidate,
+  onRejectCandidate,
   painSignals,
   mode,
   coldReason,
@@ -574,6 +608,7 @@ function ExploreWorkspace({
   candidates: Candidate[];
   selectedRank: number | null;
   onSelectCandidate: (rank: number) => void;
+  onRejectCandidate: (rank: number) => void;
   painSignals: PainSignalItem[];
   mode: string;
   coldReason: string | null;
@@ -604,12 +639,24 @@ function ExploreWorkspace({
           </div>
         </div>
       )}
+      {candidates.length > 0 && !generatingHandoff && (
+        <div className="rounded-lg border border-accent/30 bg-accent/5 px-4 py-3 text-sm text-accent">
+          <div className="font-medium">
+            請對下方每個候選方向都做出選擇，才能進下一步
+          </div>
+          <div className="mt-0.5 text-xs text-neutral-600">
+            點各維度方塊可看評分理由。採用任一方向 → 進入 BRD 諮詢；
+            全部不採用 → 我會換個切角重新發想。這段期間聊天輸入框會暫時鎖定。
+          </div>
+        </div>
+      )}
       <section>
         <h2 className="mb-2 text-sm font-semibold text-neutral-700">候選方向</h2>
         <CandidateCards
           candidates={candidates}
           selected={selectedRank}
           onSelect={onSelectCandidate}
+          onReject={onRejectCandidate}
           generatingHandoff={generatingHandoff}
         />
       </section>
