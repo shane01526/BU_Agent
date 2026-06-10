@@ -37,6 +37,7 @@ const KNOWN_EVENTS = [
   'ai_necessity_warning',
   'deliverables_ready',
   'turn_done',
+  'turn_failed',
   'heartbeat',
 ];
 

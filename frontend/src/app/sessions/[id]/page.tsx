@@ -88,6 +88,20 @@ export default function SessionPage() {
     aiNecessityWarn,
   ]);
 
+  // Watchdog:最後一道保險。若任一 loading 旗標卡住超過 60s 仍沒被解鎖事件清掉
+  // (例:SSE 斷線、後端 silent fail、turn_failed 也沒送到),自動解鎖 + 提示,
+  // 避免使用者永久卡在等待中。任一旗標變動都會重置計時;全 false 時不起計時。
+  useEffect(() => {
+    if (!awaitingAgent && !generatingHandoff && !generatingOutline) return;
+    const timer = setTimeout(() => {
+      setAwaitingAgent(false);
+      setGeneratingHandoff(false);
+      setGeneratingOutline(false);
+      alert('等待逾時，可能是網路或服務異常，請重試。');
+    }, 60_000);
+    return () => clearTimeout(timer);
+  }, [awaitingAgent, generatingHandoff, generatingOutline]);
+
   // 對話訊息來源切換：
   // - 首次 mount（liveMessages 空）→ 用 REST history 還原（resume 用）
   // - 一旦 SSE 有事件 → 改以 liveMessages 為單一來源，避免 refetch 重抓造成 BU 訊息重複
@@ -268,6 +282,18 @@ export default function SessionPage() {
           setAwaitingAgent(false);
           break;
         }
+        case 'turn_failed': {
+          // 後端背景任務丟例外時發此事件:解鎖所有 loading 狀態,避免前端永久卡住。
+          setAwaitingAgent(false);
+          setGeneratingHandoff(false);
+          setGeneratingOutline(false);
+          alert(
+            `處理時發生錯誤，請重試。${
+              d.message ? `\n(${String(d.message)})` : ''
+            }`,
+          );
+          break;
+        }
         case 'conflict_detected': {
           const cs = (d.conflicts as Array<{ section_ids: string[]; description: string }>) ?? [];
           if (cs.length) {
@@ -300,7 +326,13 @@ export default function SessionPage() {
     // 不做 optimistic：等 backend 的 bu_turn_recorded SSE 回來再 append。
     // backend 通常 < 100ms 就 publish，使用者體感差異很小，但不會有重複訊息。
     setAwaitingAgent(true);
-    sendMutation.mutate(text);
+    sendMutation.mutate(text, {
+      // postMessage 失敗(409/500/網路)時解鎖,避免輸入框永久卡住。
+      onError: (e) => {
+        setAwaitingAgent(false);
+        alert(`送出失敗，請重試。\n(${e instanceof Error ? e.message : String(e)})`);
+      },
+    });
   }
 
   async function handleSelectCandidate(rank: number) {
@@ -382,21 +414,39 @@ export default function SessionPage() {
     // 由後端 _spawn 背景跑;awaitingAgent 由第一個 agent_reply_delta 自動關
     setAwaitingAgent(true);
     setAiNecessityWarn(null);
-    await api.explainAiNecessity(sessionId);
+    try {
+      await api.explainAiNecessity(sessionId);
+    } catch (e) {
+      setAwaitingAgent(false);
+      alert(`操作失敗，請重試。\n(${e instanceof Error ? e.message : String(e)})`);
+      return;
+    }
     qc.invalidateQueries({ queryKey: ['session', sessionId] });
   }
 
   async function handleAiOverride() {
     setAwaitingAgent(true);
     setAiNecessityWarn(null);
-    await api.overrideAiNecessity(sessionId);
+    try {
+      await api.overrideAiNecessity(sessionId);
+    } catch (e) {
+      setAwaitingAgent(false);
+      alert(`操作失敗，請重試。\n(${e instanceof Error ? e.message : String(e)})`);
+      return;
+    }
     qc.invalidateQueries({ queryKey: ['session', sessionId] });
   }
 
   async function handleAiAcknowledge() {
     setAwaitingAgent(true);
     setAiNecessityWarn(null);
-    await api.acknowledgeAiNecessity(sessionId);
+    try {
+      await api.acknowledgeAiNecessity(sessionId);
+    } catch (e) {
+      setAwaitingAgent(false);
+      alert(`操作失敗，請重試。\n(${e instanceof Error ? e.message : String(e)})`);
+      return;
+    }
     qc.invalidateQueries({ queryKey: ['session', sessionId] });
   }
 
@@ -410,7 +460,13 @@ export default function SessionPage() {
     // 由後端 _spawn 背景跑;awaitingAgent 由第一個 agent_reply_delta 自動關
     setAwaitingAgent(true);
     setStage5Stuck(null);
-    await api.dismissStage5Stuck(sessionId);
+    try {
+      await api.dismissStage5Stuck(sessionId);
+    } catch (e) {
+      setAwaitingAgent(false);
+      alert(`操作失敗，請重試。\n(${e instanceof Error ? e.message : String(e)})`);
+      return;
+    }
     qc.invalidateQueries({ queryKey: ['session', sessionId] });
   }
 

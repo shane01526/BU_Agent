@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 from app.auth.middleware import current_user
 from app.core.db import get_db
 from app.core.logging import get_logger
+from app.graph.shared.events import bus
 from app.models.db import BrdSection, Deliverable, SessionRow, User
 from app.models.schemas import (
     AcceptedResponse,
@@ -35,11 +36,14 @@ log = get_logger(__name__)
 _BG_TASKS: set[asyncio.Task] = set()
 
 
-def _spawn(coro_factory, label: str) -> None:
+def _spawn(coro_factory, label: str, session_id: uuid.UUID | str | None = None) -> None:
     """以 asyncio.create_task 跑 coroutine,確保 exception 不被吞掉。
 
     asyncio 用 weak-ref 追 task,沒 keep 強 reference 會被 GC;
     用 module-level set 保住,完成時自動移除。
+
+    背景任務失敗時,除了 log,還會發 turn_failed SSE 事件給前端解鎖
+    (否則前端 awaitingAgent / generating* 會永久卡住)。
     """
 
     async def runner():
@@ -47,6 +51,15 @@ def _spawn(coro_factory, label: str) -> None:
             await coro_factory()
         except BaseException:
             log.exception("background_task_failed", label=label)
+            if session_id is not None:
+                try:
+                    await bus.publish(
+                        str(session_id),
+                        "turn_failed",
+                        {"label": label, "message": "處理時發生錯誤,請重試"},
+                    )
+                except Exception:
+                    log.exception("turn_failed_publish_failed", label=label)
 
     task = asyncio.create_task(runner())
     _BG_TASKS.add(task)
@@ -85,7 +98,7 @@ async def create_session(
 ) -> SessionSummary:
     session = await session_service.create_session(db, user, payload)
     sid = session.session_id
-    _spawn(lambda: _run_turn_bg(sid, None), f"kickoff:{sid}")
+    _spawn(lambda: _run_turn_bg(sid, None), f"kickoff:{sid}", session_id=sid)
     return SessionSummary(
         session_id=session.session_id,
         bu=session.bu,
@@ -174,7 +187,7 @@ async def post_message(
         raise HTTPException(status.HTTP_409_CONFLICT, "session not active")
 
     text = payload.text
-    _spawn(lambda: _run_turn_bg(session_id, text), f"turn:{session_id}")
+    _spawn(lambda: _run_turn_bg(session_id, text), f"turn:{session_id}", session_id=session_id)
     return AcceptedResponse()
 
 
@@ -261,7 +274,7 @@ async def acknowledge_ai_necessity_warning(
     if session is None or session.user_id != user.user_id:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "session not found")
     sid = session_id
-    _spawn(lambda: _ai_necessity_decision_bg(sid, "acknowledge"), f"ai_ack:{sid}")
+    _spawn(lambda: _ai_necessity_decision_bg(sid, "acknowledge"), f"ai_ack:{sid}", session_id=sid)
     return AcceptedResponse()
 
 
@@ -276,7 +289,7 @@ async def override_ai_necessity_warning(
     if session is None or session.user_id != user.user_id:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "session not found")
     sid = session_id
-    _spawn(lambda: _ai_necessity_decision_bg(sid, "override"), f"ai_override:{sid}")
+    _spawn(lambda: _ai_necessity_decision_bg(sid, "override"), f"ai_override:{sid}", session_id=sid)
     return AcceptedResponse()
 
 
@@ -291,7 +304,7 @@ async def explain_ai_necessity(
     if session is None or session.user_id != user.user_id:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "session not found")
     sid = session_id
-    _spawn(lambda: _ai_necessity_decision_bg(sid, "explain"), f"ai_explain:{sid}")
+    _spawn(lambda: _ai_necessity_decision_bg(sid, "explain"), f"ai_explain:{sid}", session_id=sid)
     return AcceptedResponse()
 
 
@@ -327,7 +340,7 @@ async def dismiss_stage5_stuck(
     if session is None or session.user_id != user.user_id:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "session not found")
     sid = session_id
-    _spawn(lambda: _stage5_dismiss_bg(sid), f"stage5_dismiss:{sid}")
+    _spawn(lambda: _stage5_dismiss_bg(sid), f"stage5_dismiss:{sid}", session_id=sid)
     return AcceptedResponse()
 
 

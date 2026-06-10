@@ -73,7 +73,11 @@ async def run_turn(
             mode="explore",
         )
         # 首次 invoke：graph 從 START 跑到 END，出第一題
-        await graph.ainvoke(initial.model_dump(), config=config)
+        # try/finally:首題生成失敗也要發 turn_done 解鎖前端。
+        try:
+            await graph.ainvoke(initial.model_dump(), config=config)
+        finally:
+            await _publish_turn_done(graph, session, db)
     else:
         # 從 checkpoint 讀既有 state
         state = GraphState.model_validate(current.values)
@@ -116,42 +120,62 @@ async def run_turn(
 
         # 讓 graph 從 START 再跑一輪。傳 {} 讓 pregel 啟動;
         # reducer 已改 replace semantics,空 dict 不會 merge 衝突。
-        await graph.ainvoke({}, config=config)
+        # 包在 try/finally:即使 ainvoke 丟例外,finally 仍會發 turn_done 解鎖前端。
+        try:
+            await graph.ainvoke({}, config=config)
+        finally:
+            await _publish_turn_done(graph, session, db)
 
-    # 拿最新 state 做為回傳（含 reducer 後累積結果）
     final = await graph.aget_state(config)
-    final_state = GraphState.model_validate(final.values)
+    return GraphState.model_validate(final.values)
 
-    # 兜底:無論本輪 graph 有沒有發 agent_reply_done(stage>=4 silent END、cold_exit、
-    # ai_necessity 警示等都不會發),都告訴前端「這輪結束了、可以再輸入」。
-    await bus.publish(
-        str(session.session_id),
-        "turn_done",
-        {
-            "mode": final_state.mode,
-            "stage": final_state.stage,
-            "history_len": len(final_state.history),
-        },
-    )
 
-    # 同步 DB：mode / stage / status / exploration_outputs
-    session.mode = final_state.mode
-    session.stage = final_state.stage
-    if final_state.mode == "cold":
-        session.status = "cold"
-    if final_state.structured_json and final_state.paragraph_description:
-        existing = db.get(ExplorationOutput, session.session_id)
-        if existing is None:
-            db.add(
-                ExplorationOutput(
-                    session_id=session.session_id,
-                    structured_json=final_state.structured_json,
-                    paragraph_description=final_state.paragraph_description,
+async def _publish_turn_done(graph, session: SessionRow, db: Session) -> None:
+    """兜底:無論本輪 graph 有沒有發 agent_reply_done(stage>=4 silent END、cold_exit、
+    ai_necessity 警示、甚至 ainvoke 丟例外),都告訴前端「這輪結束了、可以再輸入」,
+    並同步 DB。讀 state 失敗時仍用 session 現值發最精簡 turn_done,確保前端必定解鎖。
+    """
+    config = {"configurable": {"thread_id": str(session.session_id)}}
+    final_state: GraphState | None = None
+    try:
+        final = await graph.aget_state(config)
+        final_state = GraphState.model_validate(final.values)
+    except Exception:
+        log.exception("publish_turn_done.read_state_failed")
+
+    if final_state is not None:
+        await bus.publish(
+            str(session.session_id),
+            "turn_done",
+            {
+                "mode": final_state.mode,
+                "stage": final_state.stage,
+                "history_len": len(final_state.history),
+            },
+        )
+        # 同步 DB：mode / stage / status / exploration_outputs
+        session.mode = final_state.mode
+        session.stage = final_state.stage
+        if final_state.mode == "cold":
+            session.status = "cold"
+        if final_state.structured_json and final_state.paragraph_description:
+            existing = db.get(ExplorationOutput, session.session_id)
+            if existing is None:
+                db.add(
+                    ExplorationOutput(
+                        session_id=session.session_id,
+                        structured_json=final_state.structured_json,
+                        paragraph_description=final_state.paragraph_description,
+                    )
                 )
-            )
-    db.commit()
-
-    return final_state
+        db.commit()
+    else:
+        # 讀不到 state:仍發最精簡 turn_done,前端至少能解鎖
+        await bus.publish(
+            str(session.session_id),
+            "turn_done",
+            {"mode": session.mode, "stage": session.stage or 1},
+        )
 
 
 async def confirm_handoff(db: Session, session: SessionRow) -> GraphState:

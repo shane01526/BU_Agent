@@ -128,7 +128,7 @@ export function ConsultFullscreenLayout({
             正在依你選的方向建立 BRD 大綱…
           </div>
           <div className="mt-2 max-w-xs text-xs text-neutral-500">
-            Gemini 會依你聊過的脈絡填好需求背景與分析等章節,通常需要 15–30 秒。
+            Agent 會依你聊過的脈絡填好需求背景與分析等章節,通常需要 15–30 秒。
           </div>
         </div>
       </div>
